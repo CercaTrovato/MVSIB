@@ -30,6 +30,22 @@ parser.add_argument('--gpu', default='0', type=str, help='GPU device idx.')
 parser.add_argument('--warmup_epochs', default=20, type=int)
 parser.add_argument('--lambda_u', default=0.1, type=float)
 parser.add_argument('--lambda_hn_penalty',type=float,default=0.1)
+parser.add_argument('--cross_warmup_epochs', default=50, type=int,
+                    help='Epoch to start cross-view weighted consistency loss (Stage-3).')
+parser.add_argument('--membership_mode', default='softmax_distance', type=str,
+                    choices=['gaussian', 'softmax_distance'],
+                    help='Membership kernel mode: paper-improved softmax_distance or legacy gaussian.')
+parser.add_argument('--membership_temperature', default=1.0, type=float,
+                    help='Temperature T_m for softmax-distance membership.')
+parser.add_argument('--uncertainty_mode', default='log_odds', type=str,
+                    choices=['legacy', 'log_odds'],
+                    help='Uncertainty mode: legacy entropy/top2 or improved log-odds margin.')
+parser.add_argument('--uncertainty_kappa', default=1.0, type=float,
+                    help='Margin threshold kappa in u=Sigmoid((kappa-gamma)/T_u).')
+parser.add_argument('--uncertainty_temperature', default=0.5, type=float,
+                    help='Temperature T_u for uncertainty sigmoid mapping.')
+parser.add_argument('--reliability_temperature', default=0.5, type=float,
+                    help='Temperature T_w for reliability-weighted view fusion.')
 args = parser.parse_args()
 
 
@@ -72,8 +88,16 @@ if __name__ == "__main__":
     num_clusters = int(np.unique(mv_data.labels).size)
     input_sizes = [mv_data.data_views[i].shape[1] for i in range(num_views)]
 
-    network = Network(num_views, num_samples, num_clusters, device,
-                      input_sizes, args.feature_dim).to(device)
+    network = Network(
+        num_views, num_samples, num_clusters, device,
+        input_sizes, args.feature_dim,
+        membership_mode=args.membership_mode,
+        membership_temperature=args.membership_temperature,
+        uncertainty_mode=args.uncertainty_mode,
+        uncertainty_kappa=args.uncertainty_kappa,
+        uncertainty_temperature=args.uncertainty_temperature,
+        reliability_temperature=args.reliability_temperature,
+    ).to(device)
 
     optimizer = torch.optim.Adam(
         list(network.parameters()),
@@ -110,9 +134,10 @@ if __name__ == "__main__":
                 alpha, beta,
                 optimizer,
                 args.warmup_epochs,
-
                 args.lambda_u,
-                args.temperature_f, args.lambda_hn_penalty
+                args.lambda_hn_penalty,
+                args.temperature_f,
+                cross_warmup_epochs=args.cross_warmup_epochs
             )
 
             epoch_list.append(epoch)
@@ -177,7 +202,12 @@ if __name__ == "__main__":
             total_loss = contrastive_largedatasetstrain(
                 network, mv_data, mvc_loss,
                 args.batch_size, epoch,
-                args.k, alpha, beta, optimizer
+                args.k, alpha, beta, optimizer,
+                warmup_epochs=args.warmup_epochs,
+                lambda_u=args.lambda_u,
+                lambda_hn_penalty=args.lambda_hn_penalty,
+                temperature_f=args.temperature_f,
+                cross_warmup_epochs=args.cross_warmup_epochs
             )
 
 

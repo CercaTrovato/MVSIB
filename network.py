@@ -276,11 +276,11 @@ class Network(nn.Module):
 
         # 3) 取出对应的标签 & certain mask，全部在 GPU 上
         knn_labels = batch_psedo_label[knn_idx]  # (V, N, k)
-        certain_mask = certain_mask.unsqueeze(0).unsqueeze(2).expand(V, N, k)  # (V, N, k)
+        certain_mask_knn = certain_mask.unsqueeze(0).unsqueeze(2).expand(V, N, k)  # (V, N, k)
 
         # 4) 计算 Δd_i 的向量化版
-        same = (knn_labels == batch_psedo_label.view(1, N, 1)) & certain_mask
-        diff = (~same) & certain_mask
+        same = (knn_labels == batch_psedo_label.view(1, N, 1)) & certain_mask_knn
+        diff = (~same) & certain_mask_knn
         pos_cnt = same.sum(dim=2).float()  # (V, N)
         neg_cnt = diff.sum(dim=2).float()
         delta = (pos_cnt - neg_cnt) / (pos_cnt + neg_cnt + eps)  # (V, N)

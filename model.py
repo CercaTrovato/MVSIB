@@ -92,18 +92,13 @@ def contrastive_train(model, mv_data, mvc_loss,
                       alpha, beta,
                       optimizer,
                       warmup_epochs,
+
                       lambda_u,  lambda_hn_penalty,
                       temperature_f, max_epoch=100,
                       initial_top_p=0.3):
     model.train()
     mv_data_loader, num_views, num_samples, num_clusters = get_multiview_data(mv_data, batch_size)
 
-    # ===== NEW: epoch-wise CSD/FN-HN stats (for robustness analysis) =====
-    fn_keep_cnt = 0
-    hn_keep_cnt = 0
-    keep_cnt = 0  # 过滤后保留下来的不确定样本数（参与FN/HN判别的那部分）
-    uncertain_cnt = 0  # 过滤前 uncertain_mask 的样本数
-    # ====================================================================
     # 将 all_features 和 all_labels 初始化为 Python 列表
     all_features = []  # 用于收集每个批次的特征
     all_labels = []  # 用于收集每个批次的标签
@@ -163,41 +158,14 @@ def contrastive_train(model, mv_data, mvc_loss,
         q_centers = model.compute_centers(common_z, batch_psedo_label)
 
         # ——— 7) FN/HN 子网划分 ———
-        # res = model.classify_fn_hn(
-        #     zs, common_z, memberships,
-        #     batch_psedo_label, certain_mask, uncertain_mask,
-        #     epoch, fn_hn_warmup=10
-        # )
-        # if res[0] is not None:
-        #     logits, idx_kept, feats = res
-        #     _, y_fn = logits.max(dim=1)
-        #     fn_idx = idx_kept[y_fn == 1].to(device)
-        #     hn_idx = idx_kept[y_fn == 0].to(device)
-        # else:
-        #     logits = fn_idx = hn_idx = None
         res = model.classify_fn_hn(
             zs, common_z, memberships,
             batch_psedo_label, certain_mask, uncertain_mask,
             epoch, fn_hn_warmup=10
         )
-
-        if res is not None and res[0] is not None:
-            # 兼容返回 3 项或更多项
-            logits, idx_kept, feats = res[0], res[1], res[2]
-
-            # 如果你额外返回了 preds_kept（更推荐），优先用它；否则用 logits.max
-            if len(res) >= 4 and res[3] is not None:
-                y_fn = res[3]  # preds_kept
-            else:
-                _, y_fn = logits.max(dim=1)
-
-            # DEBUG：确认这一步确实执行
-            print("[DEBUG CT] kept_this_batch =", int(idx_kept.numel()))
-
-            keep_cnt += int(idx_kept.numel())
-            fn_keep_cnt += int((y_fn == 1).sum().item())
-            hn_keep_cnt += int((y_fn == 0).sum().item())
-
+        if res[0] is not None:
+            logits, idx_kept, feats = res
+            _, y_fn = logits.max(dim=1)
             fn_idx = idx_kept[y_fn == 1].to(device)
             hn_idx = idx_kept[y_fn == 0].to(device)
         else:
@@ -245,65 +213,21 @@ def contrastive_train(model, mv_data, mvc_loss,
 
             # d) Hard‐Negative Push & Pull Loss
             if hn_idx is not None and hn_idx.numel() > 0:
-                # # Hard Negative 现表示
-                # z_hn = common_z[hn_idx]  # (K, d)
-                # # 它们的正负簇中心（这里用自身簇中心作为负中心）
-                # pos_ctr = model.centers[num_views].to(device)[batch_psedo_label[hn_idx]]
-                # neg_ctr = pos_ctr  # 或者用全局负中心
-                #
-                # sim_pos = F.cosine_similarity(z_hn, pos_ctr, dim=1)  # (K,)
-                # sim_neg = F.cosine_similarity(z_hn, neg_ctr, dim=1)  # (K,)
-                #
-                # # push: sim_pos - sim_neg + margin <= 0
-                # push_loss = torch.relu(sim_pos - sim_neg + margin).mean()
-                # # pull: 1 - sim_neg <= 0
-                # pull_loss = (1.0 - sim_neg).mean()
-                #
-                # Lpen_i = gate_val * (lambda_push * push_loss + lambda_pull * pull_loss)
+                # Hard Negative 现表示
+                z_hn = common_z[hn_idx]  # (K, d)
+                # 它们的正负簇中心（这里用自身簇中心作为负中心）
+                pos_ctr = model.centers[num_views].to(device)[batch_psedo_label[hn_idx]]
+                neg_ctr = pos_ctr  # 或者用全局负中心
 
-                if hn_idx is not None and hn_idx.numel() > 0:
-                    # # Hard Negative 现表示
-                    # z_hn = common_z[hn_idx]  # (K, d)
-                    # # 它们的正负簇中心（这里用自身簇中心作为负中心）
-                    # pos_ctr = model.centers[num_views].to(device)[batch_psedo_label[hn_idx]]
-                    # neg_ctr = pos_ctr  # 或者用全局负中心
-                    #
-                    # sim_pos = F.cosine_similarity(z_hn, pos_ctr, dim=1)  # (K,)
-                    # sim_neg = F.cosine_similarity(z_hn, neg_ctr, dim=1)  # (K,)
-                    #
-                    # # push: sim_pos - sim_neg + margin <= 0
-                    # push_loss = torch.relu(sim_pos - sim_neg + margin).mean()
-                    # # pull: 1 - sim_neg <= 0
-                    # pull_loss = (1.0 - sim_neg).mean()
-                    #
-                    # Lpen_i = gate_val * (lambda_push * push_loss + lambda_pull * pull_loss)
-                    # ---- Hard-Negative Push/Pull (fixed) ----
-                    z_hn = common_z[hn_idx]  # (K, d)
-                    labels_hn = batch_psedo_label[hn_idx]  # (K,)
+                sim_pos = F.cosine_similarity(z_hn, pos_ctr, dim=1)  # (K,)
+                sim_neg = F.cosine_similarity(z_hn, neg_ctr, dim=1)  # (K,)
 
-                    # Use consensus centers (num_views index = V)
-                    C = model.centers[num_views].to(device)  # (L, d)
+                # push: sim_pos - sim_neg + margin <= 0
+                push_loss = torch.relu(sim_pos - sim_neg + margin).mean()
+                # pull: 1 - sim_neg <= 0
+                pull_loss = (1.0 - sim_neg).mean()
 
-                    # Normalize for cosine geometry (recommended for stability)
-                    z_hn = F.normalize(z_hn, p=2, dim=1)  # (K, d)
-                    C = F.normalize(C, p=2, dim=1)  # (L, d)
-
-                    # Positive center
-                    pos_ctr = C[labels_hn]  # (K, d)
-                    sim_pos = (z_hn * pos_ctr).sum(dim=1)  # cosine since normalized
-
-                    # Hardest negative center: argmax_{k != y} cos(z, C[k])
-                    sims = z_hn @ C.t()  # (K, L)
-                    sims.scatter_(1, labels_hn.view(-1, 1), float("-inf"))
-                    hard_neg_idx = sims.argmax(dim=1)  # (K,)
-                    neg_ctr = C[hard_neg_idx]  # (K, d)
-                    sim_neg = (z_hn * neg_ctr).sum(dim=1)  # (K,)
-
-                    # Margin ranking: want sim_pos >= sim_neg + margin
-                    push_loss = torch.relu(sim_neg - sim_pos + margin).mean()
-                    pull_loss = (1.0 - sim_pos).mean()
-
-                    Lpen_i = gate_val * (lambda_push * push_loss + lambda_pull * pull_loss)
+                Lpen_i = gate_val * (lambda_push * push_loss + lambda_pull * pull_loss)
             else:
                 Lpen_i = torch.tensor(0.0, device=device)
 
@@ -334,15 +258,7 @@ def contrastive_train(model, mv_data, mvc_loss,
         print(f"[Epoch {epoch} Batch {batch_idx}] "
               f"Total={total_loss.item():.4f}  "
               )
-    # ===== NEW: epoch-wise summary for robustness plots =====
-    fn_ratio_in_kept = fn_keep_cnt / max(keep_cnt, 1)
-    hn_ratio_in_kept = hn_keep_cnt / max(keep_cnt, 1)
-    keep_rate = keep_cnt / max(uncertain_cnt, 1)
 
-    print(f"[Epoch {epoch} CSD-stats] "
-            f"uncertain={uncertain_cnt} kept={keep_cnt} keep_rate={keep_rate:.3f} "
-            f"FN_ratio={fn_ratio_in_kept:.3f} HN_ratio={hn_ratio_in_kept:.3f}")
-    # =======================================================
     # ===== 训练循环结束 =====
     return total_loss
 
@@ -466,34 +382,13 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
 
             # d) Hard‐Negative Push/Pull
             if hn_idx is not None and hn_idx.numel() > 0:
-                # z_hn = common_z[hn_idx]
-                # pos_ctr = model.centers[num_views][batch_label[hn_idx]].to(device)
-                # neg_ctr = pos_ctr
-                # sim_pos = F.cosine_similarity(z_hn, pos_ctr, dim=1)
-                # sim_neg = F.cosine_similarity(z_hn, neg_ctr, dim=1)
-                # push = torch.relu(sim_pos - sim_neg + 0.2).mean()
-                # pull = (1.0 - sim_neg).mean()
-                # Lpen = gate * (lambda_hn_penalty * push + lambda_hn_penalty * pull)
                 z_hn = common_z[hn_idx]
-                labels_hn = batch_label[hn_idx]
-                C = model.centers[num_views].to(device)
-
-                z_hn = F.normalize(z_hn, p=2, dim=1)
-                C = F.normalize(C, p=2, dim=1)
-
-                pos_ctr = C[labels_hn]
-                sim_pos = (z_hn * pos_ctr).sum(dim=1)
-
-                sims = z_hn @ C.t()
-                sims.scatter_(1, labels_hn.view(-1, 1), float("-inf"))
-                hard_neg_idx = sims.argmax(dim=1)
-                neg_ctr = C[hard_neg_idx]
-                sim_neg = (z_hn * neg_ctr).sum(dim=1)
-
-                margin = 0.2
-                push = torch.relu(sim_neg - sim_pos + margin).mean()
-                pull = (1.0 - sim_pos).mean()
-
+                pos_ctr = model.centers[num_views][batch_label[hn_idx]].to(device)
+                neg_ctr = pos_ctr
+                sim_pos = F.cosine_similarity(z_hn, pos_ctr, dim=1)
+                sim_neg = F.cosine_similarity(z_hn, neg_ctr, dim=1)
+                push = torch.relu(sim_pos - sim_neg + 0.2).mean()
+                pull = (1.0 - sim_neg).mean()
                 Lpen = gate * (lambda_hn_penalty * push + lambda_hn_penalty * pull)
             else:
                 Lpen = torch.tensor(0.0, device=device)

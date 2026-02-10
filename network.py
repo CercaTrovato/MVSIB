@@ -324,69 +324,6 @@ class Network(nn.Module):
 
         return logits, idx_kept, feats
 
-    # def classify_fn_hn(self,
-    #                    zs_list, common_z, memberships,
-    #                    batch_psedo_label, certain_mask, uncertain_mask,
-    #                    epoch=100, fn_hn_warmup=10, conf_thresh=0.5):
-    #
-    #     # 1) 如果还没到 warm-up，直接跳过
-    #     if epoch < fn_hn_warmup or not uncertain_mask.any():
-    #         return None, None, None
-    #     device = self.device
-    #
-    #     # 0) 统一到同一个 device
-    #     batch_psedo_label = batch_psedo_label.to(device)
-    #     certain_mask = certain_mask.to(device)
-    #     uncertain_mask = uncertain_mask.to(device)
-    #
-    #     V = self.num_views
-    #     N = batch_psedo_label.size(0)
-    #     k = self.fn_hn_k
-    #     eps = 1e-12
-    #
-    #     # 1) 预计算 kNN distances & indices → dists: (V, N, N)
-    #     dists = torch.stack([
-    #         torch.cdist(z.to(device), z.to(device), p=2)
-    #         for z in zs_list
-    #     ], dim=0)
-    #
-    #     # 2) top-(k+1) 排除自身后取前 k，knn_idx: (V, N, k)
-    #     knn_idx = torch.topk(-dists, k + 1, dim=2).indices[:, :, 1:]
-    #
-    #     # 3) 取出对应的标签 & certain mask，全部在 GPU 上
-    #     knn_labels = batch_psedo_label[knn_idx]  # (V, N, k)
-    #     certain_mask = certain_mask.unsqueeze(0).unsqueeze(2).expand(V, N, k)  # (V, N, k)
-    #
-    #     # 4) 计算 Δd_i 的向量化版
-    #     same = (knn_labels == batch_psedo_label.view(1, N, 1)) & certain_mask
-    #     diff = (~same) & certain_mask
-    #     pos_cnt = same.sum(dim=2).float()  # (V, N)
-    #     neg_cnt = diff.sum(dim=2).float()
-    #     delta = (pos_cnt - neg_cnt) / (pos_cnt + neg_cnt + eps)  # (V, N)
-    #     delta_d = delta.mean(dim=0)  # (N,)
-    #
-    #     # 5) 计算 s_i：共识中心相似度
-    #     mu_c = self.centers[V][batch_psedo_label]  # (N, d)
-    #     s = F.cosine_similarity(common_z, mu_c, dim=1)  # (N,)
-    #
-    #     # 6) 计算 a_i：跨视图距离均值差
-    #     v_idx = torch.arange(V, device=device)[:, None, None]
-    #     n_idx = torch.arange(N, device=device)[None, :, None]
-    #     neigh_d = dists[v_idx, n_idx, knn_idx]  # (V, N, k)
-    #     d_pos = torch.where(same, neigh_d, torch.nan).nanmean(dim=2)
-    #     d_neg = torch.where(diff, neigh_d, torch.nan).nanmean(dim=2)
-    #     d_pos = torch.nan_to_num(d_pos, nan=0.0)
-    #     d_neg = torch.nan_to_num(d_neg, nan=0.0)
-    #     a = ((d_neg - d_pos) / (d_neg + d_pos + eps)).mean(dim=0)  # (N,)
-    #
-    #     # 7) 筛出不确定样本，拼接特征，走 MLP
-    #     idx_uncertain = uncertain_mask.nonzero(as_tuple=True)[0]  # (M,)
-    #     feats = torch.stack([delta_d, s, a], dim=1)[idx_uncertain]  # (M,3)
-    #     logits = self.mlp_fn_hn(feats)  # (M,2)
-    #
-    #     # **去掉 softmax + conf_thresh 过滤，直接返回所有不确定样本的分类结果**
-    #     return logits, idx_uncertain, feats
-
     def compute_consistency_scores(self, memberships, batch_psedo_label):
         """
         计算跨视图一致性分数 S_ij ∈ [0,1]，形状 (N, N)。

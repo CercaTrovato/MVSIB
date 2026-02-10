@@ -30,6 +30,8 @@ parser.add_argument('--gpu', default='0', type=str, help='GPU device idx.')
 parser.add_argument('--warmup_epochs', default=20, type=int)
 parser.add_argument('--lambda_u', default=0.1, type=float)
 parser.add_argument('--lambda_hn_penalty',type=float,default=0.1)
+parser.add_argument('--cross_warmup_epochs', default=50, type=int,
+                    help='Epoch to start cross-view weighted consistency loss (Stage-3).')
 args = parser.parse_args()
 
 
@@ -110,9 +112,10 @@ if __name__ == "__main__":
                 alpha, beta,
                 optimizer,
                 args.warmup_epochs,
-
                 args.lambda_u,
-                args.temperature_f, args.lambda_hn_penalty
+                args.lambda_hn_penalty,
+                args.temperature_f,
+                cross_warmup_epochs=args.cross_warmup_epochs
             )
 
             epoch_list.append(epoch)
@@ -177,7 +180,12 @@ if __name__ == "__main__":
             total_loss = contrastive_largedatasetstrain(
                 network, mv_data, mvc_loss,
                 args.batch_size, epoch,
-                args.k, alpha, beta, optimizer
+                args.k, alpha, beta, optimizer,
+                warmup_epochs=args.warmup_epochs,
+                lambda_u=args.lambda_u,
+                lambda_hn_penalty=args.lambda_hn_penalty,
+                temperature_f=args.temperature_f,
+                cross_warmup_epochs=args.cross_warmup_epochs
             )
 
 

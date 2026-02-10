@@ -92,10 +92,10 @@ def contrastive_train(model, mv_data, mvc_loss,
                       alpha, beta,
                       optimizer,
                       warmup_epochs,
-
                       lambda_u,  lambda_hn_penalty,
                       temperature_f, max_epoch=100,
-                      initial_top_p=0.3):
+                      initial_top_p=0.3,
+                      cross_warmup_epochs=50):
     model.train()
     mv_data_loader, num_views, num_samples, num_clusters = get_multiview_data(mv_data, batch_size)
 
@@ -215,9 +215,18 @@ def contrastive_train(model, mv_data, mvc_loss,
             if hn_idx is not None and hn_idx.numel() > 0:
                 # Hard Negative 现表示
                 z_hn = common_z[hn_idx]  # (K, d)
-                # 它们的正负簇中心（这里用自身簇中心作为负中心）
-                pos_ctr = model.centers[num_views].to(device)[batch_psedo_label[hn_idx]]
-                neg_ctr = pos_ctr  # 或者用全局负中心
+                # 正中心取当前伪标签中心，负中心取最近异类中心（对应 Eq.(26)-(27)）
+                cons_centers = model.centers[num_views].to(device)
+                pos_ctr = cons_centers[batch_psedo_label[hn_idx]]
+                sim_all = F.cosine_similarity(
+                    z_hn.unsqueeze(1),
+                    cons_centers.unsqueeze(0),
+                    dim=2
+                )
+                one_hot_pos = F.one_hot(batch_psedo_label[hn_idx], num_classes=num_clusters).bool()
+                sim_all = sim_all.masked_fill(one_hot_pos, -1e9)
+                neg_idx = sim_all.argmax(dim=1)
+                neg_ctr = cons_centers[neg_idx]
 
                 sim_pos = F.cosine_similarity(z_hn, pos_ctr, dim=1)  # (K,)
                 sim_neg = F.cosine_similarity(z_hn, neg_ctr, dim=1)  # (K,)
@@ -235,7 +244,7 @@ def contrastive_train(model, mv_data, mvc_loss,
             loss_list.append(Lpen_i)
 
             # e) 跨视图加权 InfoNCE
-            if epoch > warmup_epochs:
+            if epoch > cross_warmup_epochs:
                 cross_l = mvc_loss.cross_view_weighted_loss(
                     model, zs, common_z, memberships,
                     batch_psedo_label, temperature=temperature_f
@@ -275,7 +284,8 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                                    lambda_hn_penalty=0.1,
                                    temperature_f=0.5,    # 默认温度系数
                                    max_epoch=100,
-                                   initial_top_p=0.3):
+                                   initial_top_p=0.3,
+                                   cross_warmup_epochs=50):
     """
     大数据集版 Contrastive Training：
     - k: 用于构建每个视图下的 k-NN 图
@@ -383,8 +393,17 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             # d) Hard‐Negative Push/Pull
             if hn_idx is not None and hn_idx.numel() > 0:
                 z_hn = common_z[hn_idx]
-                pos_ctr = model.centers[num_views][batch_label[hn_idx]].to(device)
-                neg_ctr = pos_ctr
+                cons_centers = model.centers[num_views].to(device)
+                pos_ctr = cons_centers[batch_label[hn_idx]]
+                sim_all = F.cosine_similarity(
+                    z_hn.unsqueeze(1),
+                    cons_centers.unsqueeze(0),
+                    dim=2
+                )
+                one_hot_pos = F.one_hot(batch_label[hn_idx], num_classes=num_clusters).bool()
+                sim_all = sim_all.masked_fill(one_hot_pos, -1e9)
+                neg_idx = sim_all.argmax(dim=1)
+                neg_ctr = cons_centers[neg_idx]
                 sim_pos = F.cosine_similarity(z_hn, pos_ctr, dim=1)
                 sim_neg = F.cosine_similarity(z_hn, neg_ctr, dim=1)
                 push = torch.relu(sim_pos - sim_neg + 0.2).mean()
@@ -395,7 +414,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             batch_loss += Lpen
 
             # e) 跨视图加权 InfoNCE
-            if epoch > warmup_epochs:
+            if epoch > cross_warmup_epochs:
                 cross_l = mvc_loss.cross_view_weighted_loss(
                     model, zs, common_z, memberships,
                     batch_label, temperature=temperature_f

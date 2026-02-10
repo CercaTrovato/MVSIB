@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.mixture import GaussianMixture
 
 class Loss(nn.Module):
     def __init__(self, batch_size, num_clusters, temperature_l, temperature_f,
@@ -260,7 +259,13 @@ class Loss(nn.Module):
     def weighted_info_nce(self, reps, S, temperature):
         sim = F.cosine_similarity(reps.unsqueeze(1), reps.unsqueeze(0), dim=2) / temperature  # (N, N)
 
-        # 使用 S 直接对所有样本对进行加权
+        # 按 Eq.(48) 对 S 做按行归一化（排除对角项）
+        S = S.clone()
+        eye = torch.eye(S.size(0), device=S.device, dtype=torch.bool)
+        S = S.masked_fill(eye, 0.0)
+        S = S / (S.sum(dim=1, keepdim=True) + 1e-8)
+
+        # 使用归一化后的 S 对所有样本对进行加权
         exp_sim = torch.exp(sim)  # (N, N)
         weighted_sim = exp_sim * S  # 每个样本对的加权相似度 (N, N)
 

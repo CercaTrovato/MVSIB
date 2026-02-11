@@ -221,14 +221,15 @@ if __name__ == "__main__":
             empty_cluster = int((counts == 0).sum())
             min_cluster = int(counts.min()) if counts.size > 0 else 0
             route_line = (
-                f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} route_uncertain_only={int(args.route_uncertain_only)} "
-                f"U_size={R['U_size']:.2f} N_size={R['N_size']:.2f} alpha_fn={args.alpha_fn:.4f} pi_fn={args.pi_fn:.4f} "
+                f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only={int(args.route_uncertain_only)} "
+                f"U_size={int(R['U_size'])} neg_per_anchor={R['neg_per_anchor']:.2f} alpha_fn={args.alpha_fn:.4f} pi_fn={args.pi_fn:.4f} "
                 f"w_min={args.w_min:.4f} hn_beta={args.hn_beta:.4f} FN_ratio={R['fn_ratio']:.4f} safe_ratio={R['safe_ratio']:.4f} "
-                f"HN_ratio={R['hn_ratio']:.4f} mean_s_post_FN={R['mean_s_post_fn']:.4f} mean_s_post_nonFN={R['mean_s_post_non_fn']:.4f} "
+                f"HN_ratio={R['hn_ratio']:.4f} FN_count={R['FN_count']:.0f} HN_count={R['HN_count']:.0f} neg_count={R['neg_count']:.0f} safe_neg_count={R['safe_neg_count']:.0f} "
+                f"mean_s_post_FN={R['mean_s_post_fn']:.4f} mean_s_post_nonFN={R['mean_s_post_non_fn']:.4f} "
                 f"delta_post={R['delta_post']:.4f} mean_sim_HN={R['mean_sim_hn']:.4f} mean_sim_safe_nonHN={R['mean_sim_safe_non_hn']:.4f} "
                 f"delta_sim={R['delta_sim']:.4f} label_flip={R['label_flip']:.4f} stab_rate={R['stab_rate']:.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={R['denom_fn_share']:.4f} denom_safe_share={R['denom_safe_share']:.4f} "
-                f"w_hit_min_ratio={R['w_hit_min_ratio']:.4f}"
+                f"w_hit_min_ratio={R['w_hit_min_ratio']:.4f} w_mean_on_FN={R['w_mean_on_FN']:.4f} w_mean_on_safe={R['w_mean_on_safe']:.4f}"
             )
             logger.info(metric_line)
             logger.info(route_line)
@@ -251,7 +252,7 @@ if __name__ == "__main__":
                     f"w_p10={w_p10:.4f} w_p50={w_p50:.4f} w_p90={w_p90:.4f} w_mean={w_mean:.4f} w_std={w_std:.4f} "
                     f"sim_pos_p50={sp50:.4f} sim_pos_p90={sp90:.4f} sim_neg_p90={sn90:.4f} sim_neg_p99={sn99:.4f} "
                     f"m_top1_p10={mt10:.4f} m_top1_p50={mt50:.4f} m_top1_p90={mt90:.4f} "
-                    f"m_gap_p10={mg10:.4f} m_gap_p50={mg50:.4f} m_gap_p90={mg90:.4f}"
+                    f"m_gap_p10={mg10:.4f} m_gap_p50={mg50:.4f} m_gap_p90={mg90:.4f} fn_pair_share={R['fn_pair_share']:.4f} hn_pair_share={R['hn_pair_share']:.4f}"
                 )
                 logger.info(distr_line)
 
@@ -358,14 +359,15 @@ if __name__ == "__main__":
             empty_cluster = int((counts == 0).sum())
             min_cluster = int(counts.min()) if counts.size > 0 else 0
             route_line = (
-                f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} route_uncertain_only={int(args.route_uncertain_only)} "
-                f"U_size={R['U_size']:.2f} N_size={R['N_size']:.2f} alpha_fn={args.alpha_fn:.4f} pi_fn={args.pi_fn:.4f} "
+                f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only={int(args.route_uncertain_only)} "
+                f"U_size={int(R['U_size'])} neg_per_anchor={R['neg_per_anchor']:.2f} alpha_fn={args.alpha_fn:.4f} pi_fn={args.pi_fn:.4f} "
                 f"w_min={args.w_min:.4f} hn_beta={args.hn_beta:.4f} FN_ratio={R['fn_ratio']:.4f} safe_ratio={R['safe_ratio']:.4f} "
-                f"HN_ratio={R['hn_ratio']:.4f} mean_s_post_FN={R['mean_s_post_fn']:.4f} mean_s_post_nonFN={R['mean_s_post_non_fn']:.4f} "
+                f"HN_ratio={R['hn_ratio']:.4f} FN_count={R['FN_count']:.0f} HN_count={R['HN_count']:.0f} neg_count={R['neg_count']:.0f} safe_neg_count={R['safe_neg_count']:.0f} "
+                f"mean_s_post_FN={R['mean_s_post_fn']:.4f} mean_s_post_nonFN={R['mean_s_post_non_fn']:.4f} "
                 f"delta_post={R['delta_post']:.4f} mean_sim_HN={R['mean_sim_hn']:.4f} mean_sim_safe_nonHN={R['mean_sim_safe_non_hn']:.4f} "
                 f"delta_sim={R['delta_sim']:.4f} label_flip={R['label_flip']:.4f} stab_rate={R['stab_rate']:.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={R['denom_fn_share']:.4f} denom_safe_share={R['denom_safe_share']:.4f} "
-                f"w_hit_min_ratio={R['w_hit_min_ratio']:.4f}"
+                f"w_hit_min_ratio={R['w_hit_min_ratio']:.4f} w_mean_on_FN={R['w_mean_on_FN']:.4f} w_mean_on_safe={R['w_mean_on_safe']:.4f}"
             )
             logger.info(metric_line)
             logger.info(route_line)
@@ -388,7 +390,7 @@ if __name__ == "__main__":
                     f"w_p10={w_p10:.4f} w_p50={w_p50:.4f} w_p90={w_p90:.4f} w_mean={w_mean:.4f} w_std={w_std:.4f} "
                     f"sim_pos_p50={sp50:.4f} sim_pos_p90={sp90:.4f} sim_neg_p90={sn90:.4f} sim_neg_p99={sn99:.4f} "
                     f"m_top1_p10={mt10:.4f} m_top1_p50={mt50:.4f} m_top1_p90={mt90:.4f} "
-                    f"m_gap_p10={mg10:.4f} m_gap_p50={mg50:.4f} m_gap_p90={mg90:.4f}"
+                    f"m_gap_p10={mg10:.4f} m_gap_p50={mg50:.4f} m_gap_p90={mg90:.4f} fn_pair_share={R['fn_pair_share']:.4f} hn_pair_share={R['hn_pair_share']:.4f}"
                 )
                 logger.info(distr_line)
 

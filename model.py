@@ -148,17 +148,22 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
     w_neg = torch.ones(N, N, device=device)
     fn_ratio_list = []
     fn_ratio_per_anchor = torch.zeros(N, device=device)
+    tau_fn_per_anchor = torch.full((N,), float('nan'), device=device)
+    fn_count_per_anchor = torch.zeros(N, device=device)
     for i in range(N):
         idx = neg_mask[i].nonzero(as_tuple=True)[0]
         if idx.numel() == 0:
             continue
         s_i = S[i, idx]
         tau_i = torch.quantile(s_i, max(0.0, min(1.0, 1.0 - alpha_fn)))
+        tau_fn_per_anchor[i] = tau_i
         rho_i = s_i >= tau_i
         if uncertain_mask is not None and (not bool(uncertain_mask[i])):
             rho_i = torch.zeros_like(rho_i)
         rho[i, idx] = rho_i
         w_neg[i, idx[rho_i]] = max(gate_val * pi_fn, w_min)
+        fn_count_i = rho_i.float().sum()
+        fn_count_per_anchor[i] = fn_count_i
         fn_ratio_i = rho_i.float().mean()
         fn_ratio_list.append(fn_ratio_i)
         fn_ratio_per_anchor[i] = fn_ratio_i
@@ -167,16 +172,20 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
     sim = F.cosine_similarity(common_z.unsqueeze(1), common_z.unsqueeze(0), dim=2)
     eta = torch.zeros(N, N, dtype=torch.bool, device=device)
     hn_ratio_list = []
+    tau_hn_per_anchor = torch.full((N,), float('nan'), device=device)
+    hn_count_per_anchor = torch.zeros(N, device=device)
     for i in range(N):
         safe_idx = (neg_mask[i] & (~rho[i])).nonzero(as_tuple=True)[0]
         if safe_idx.numel() == 0:
             continue
         sim_i = sim[i, safe_idx]
         tau_hn_i = torch.quantile(sim_i, max(0.0, min(1.0, 1.0 - hn_beta)))
+        tau_hn_per_anchor[i] = tau_hn_i
         eta_i = sim_i >= tau_hn_i
         if uncertain_mask is not None and (not bool(uncertain_mask[i])):
             eta_i = torch.zeros_like(eta_i)
         eta[i, safe_idx] = eta_i
+        hn_count_per_anchor[i] = eta_i.float().sum()
         hn_ratio_list.append(eta_i.float().mean())
 
     u_center = u_hat - u_hat.mean()
@@ -196,10 +205,21 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
     denom_fn = (w_neg * exp_sim * rho.float()).sum()
     denom_fn_share = (denom_fn / denom_all).item()
 
+    fn_count = rho.float().sum().item()
+    hn_count = eta.float().sum().item()
+    neg_count = neg_mask.float().sum().item()
+    safe_neg_count = safe_mask.float().sum().item()
+
     stats = {
         'fn_ratio': torch.stack(fn_ratio_list).mean().item() if fn_ratio_list else 0.0,
         'safe_ratio': ((safe_mask.float().sum() / (neg_mask.float().sum() + eps))).item(),
         'hn_ratio': torch.stack(hn_ratio_list).mean().item() if hn_ratio_list else 0.0,
+        'FN_count': fn_count,
+        'HN_count': hn_count,
+        'neg_count': neg_count,
+        'safe_neg_count': safe_neg_count,
+        'w_mean_on_FN': w_neg[rho].mean().item() if rho.any() else 0.0,
+        'w_mean_on_safe': w_neg[safe_mask].mean().item() if safe_mask.any() else 0.0,
         'mean_s_post_fn': mean_s_post_fn,
         'mean_s_post_non_fn': mean_s_post_non_fn,
         'delta_post': mean_s_post_fn - mean_s_post_non_fn,
@@ -213,11 +233,16 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
         'w_hit_min_ratio': ((w_neg <= (w_min + eps)) & rho).float().mean().item() if rho.any() else 0.0,
         'corr_u_fn_ratio': corr_u_fn.item(),
         'N_size': (neg_mask.float().sum(dim=1).mean().item()),
+        'neg_per_anchor': (neg_mask.float().sum(dim=1).mean().item()),
         'U_size': int(uncertain_mask.sum().item()) if uncertain_mask is not None else int(N),
+        'fn_pair_share': rho[neg_mask].float().mean().item() if neg_mask.any() else 0.0,
+        'hn_pair_share': eta[neg_mask].float().mean().item() if neg_mask.any() else 0.0,
     }
     aux = {
         'S': S, 's_post': s_post, 'sim': sim, 'rho': rho, 'eta': eta, 'w_neg': w_neg,
-        'r': r, 's_stab': s_stab, 'neg_mask': neg_mask
+        'r': r, 's_stab': s_stab, 'neg_mask': neg_mask,
+        'tau_fn_per_anchor': tau_fn_per_anchor, 'tau_hn_per_anchor': tau_hn_per_anchor,
+        'FN_count_per_anchor': fn_count_per_anchor, 'HN_count_per_anchor': hn_count_per_anchor,
     }
     return w_neg, eta, rho, stats, aux
 
@@ -431,6 +456,15 @@ def contrastive_train(model, mv_data, mvc_loss,
             's_stab_pair_sample': route_aux['s_stab'][route_aux['neg_mask']].detach().cpu(),
             'sim_pos_sample': pos_sim.detach().cpu(),
             'sim_neg_sample': neg_sim.detach().cpu(),
+            'uncertain_mask_sample': uncertain_mask.detach().cpu(),
+            'neg_mask_sample': route_aux['neg_mask'].detach().cpu(),
+            'top_p_e': torch.tensor(top_p_e),
+            'k_unc': torch.tensor(k_unc),
+            'tau_fn_per_anchor': route_aux['tau_fn_per_anchor'].detach().cpu(),
+            'tau_hn_per_anchor': route_aux['tau_hn_per_anchor'].detach().cpu(),
+            'FN_count_per_anchor': route_aux['FN_count_per_anchor'].detach().cpu(),
+            'HN_count_per_anchor': route_aux['HN_count_per_anchor'].detach().cpu(),
+            'gate_val': torch.tensor(gate_val),
         }
 
         print(f"[Epoch {epoch} Batch {batch_idx}] "
@@ -641,6 +675,15 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             's_stab_pair_sample': route_aux['s_stab'][route_aux['neg_mask']].detach().cpu(),
             'sim_pos_sample': pos_sim.detach().cpu(),
             'sim_neg_sample': neg_sim.detach().cpu(),
+            'uncertain_mask_sample': uncertain.detach().cpu(),
+            'neg_mask_sample': route_aux['neg_mask'].detach().cpu(),
+            'top_p_e': torch.tensor(top_p),
+            'k_unc': torch.tensor(k_unc),
+            'tau_fn_per_anchor': route_aux['tau_fn_per_anchor'].detach().cpu(),
+            'tau_hn_per_anchor': route_aux['tau_hn_per_anchor'].detach().cpu(),
+            'FN_count_per_anchor': route_aux['FN_count_per_anchor'].detach().cpu(),
+            'HN_count_per_anchor': route_aux['HN_count_per_anchor'].detach().cpu(),
+            'gate_val': torch.tensor(gate),
         }
 
     if batch_count > 0:

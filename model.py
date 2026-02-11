@@ -184,17 +184,42 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
     denom = (u_center.norm() * fn_center.norm() + eps)
     corr_u_fn = (u_center * fn_center).sum() / denom
 
+    safe_mask = neg_mask & (~rho)
+    non_hn_safe_mask = safe_mask & (~eta)
+    mean_s_post_fn = s_post[rho].mean().item() if rho.any() else 0.0
+    mean_s_post_non_fn = s_post[safe_mask].mean().item() if safe_mask.any() else 0.0
+    mean_sim_hn = sim[eta].mean().item() if eta.any() else 0.0
+    mean_sim_safe_non_hn = sim[non_hn_safe_mask].mean().item() if non_hn_safe_mask.any() else 0.0
+
+    exp_sim = torch.exp(sim)
+    denom_all = (w_neg * exp_sim * neg_mask.float()).sum() + eps
+    denom_fn = (w_neg * exp_sim * rho.float()).sum()
+    denom_fn_share = (denom_fn / denom_all).item()
+
     stats = {
         'fn_ratio': torch.stack(fn_ratio_list).mean().item() if fn_ratio_list else 0.0,
+        'safe_ratio': ((safe_mask.float().sum() / (neg_mask.float().sum() + eps))).item(),
         'hn_ratio': torch.stack(hn_ratio_list).mean().item() if hn_ratio_list else 0.0,
+        'mean_s_post_fn': mean_s_post_fn,
+        'mean_s_post_non_fn': mean_s_post_non_fn,
+        'delta_post': mean_s_post_fn - mean_s_post_non_fn,
+        'mean_sim_hn': mean_sim_hn,
+        'mean_sim_safe_non_hn': mean_sim_safe_non_hn,
+        'delta_sim': mean_sim_hn - mean_sim_safe_non_hn,
+        'label_flip': (1.0 - s_stab.diag().mean().item()) if prev_labels_batch is not None else 0.0,
         'stab_rate': s_stab.diag().mean().item() if prev_labels_batch is not None else 0.0,
-        'mean_s_post_fn': s_post[rho].mean().item() if rho.any() else 0.0,
-        'mean_s_post_non_fn': s_post[neg_mask & (~rho)].mean().item() if (neg_mask & (~rho)).any() else 0.0,
-        'mean_sim_hn': sim[eta].mean().item() if eta.any() else 0.0,
-        'mean_sim_safe_non_hn': sim[(neg_mask & (~rho) & (~eta))].mean().item() if (neg_mask & (~rho) & (~eta)).any() else 0.0,
+        'denom_fn_share': denom_fn_share,
+        'denom_safe_share': 1.0 - denom_fn_share,
+        'w_hit_min_ratio': ((w_neg <= (w_min + eps)) & rho).float().mean().item() if rho.any() else 0.0,
         'corr_u_fn_ratio': corr_u_fn.item(),
+        'N_size': (neg_mask.float().sum(dim=1).mean().item()),
+        'U_size': int(uncertain_mask.sum().item()) if uncertain_mask is not None else int(N),
     }
-    return w_neg, eta, rho, stats
+    aux = {
+        'S': S, 's_post': s_post, 'sim': sim, 'rho': rho, 'eta': eta, 'w_neg': w_neg,
+        'r': r, 's_stab': s_stab, 'neg_mask': neg_mask
+    }
+    return w_neg, eta, rho, stats, aux
 
 
 def contrastive_train(model, mv_data, mvc_loss,
@@ -233,6 +258,11 @@ def contrastive_train(model, mv_data, mvc_loss,
     margin = 0.2
 
     criterion = torch.nn.MSELoss()  # 添加重建损失的损失函数
+
+    epoch_meter = {'L_total':0.0,'L_recon':0.0,'L_feat':0.0,'L_cross':0.0,'L_cluster':0.0,'L_uncert':0.0,'L_hn':0.0,'L_reg':0.0}
+    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0}
+    batch_count = 0
+    last_dump = {}
 
     for batch_idx, (sub_data_views, _, sample_idx) in enumerate(mv_data_loader):
         # ——— 1) 伪标签 & 同/异样本矩阵 ———
@@ -278,7 +308,7 @@ def contrastive_train(model, mv_data, mvc_loss,
         # ——— 7) Design 1': pair-wise FN 风险路由（停用原 FN/HN MLP 路径）———
         prev_batch = None if y_prev_labels is None else y_prev_labels[sample_idx].to(device)
         route_mask = uncertain_mask if route_uncertain_only else None
-        w_neg, eta_mat, rho_mat, route_stats = _build_pairwise_fn_risk(
+        w_neg, eta_mat, rho_mat, route_stats, route_aux = _build_pairwise_fn_risk(
             common_z=common_z,
             memberships_cons=memberships[num_views],
             u_hat=u_hat,
@@ -366,13 +396,56 @@ def contrastive_train(model, mv_data, mvc_loss,
         total_loss.backward()
         optimizer.step()
 
+        epoch_meter['L_total'] += total_loss.item()
+        epoch_meter['L_recon'] += Lrecon
+        epoch_meter['L_feat'] += Lfeat
+        epoch_meter['L_cross'] += Lcross
+        epoch_meter['L_cluster'] += Lcl
+        epoch_meter['L_uncert'] += Lu
+        epoch_meter['L_hn'] += Lpen
+        for k in route_meter:
+            route_meter[k] += route_stats.get(k, 0.0)
+        batch_count += 1
+
+        m_cons = memberships[num_views]
+        top2_m = torch.topk(m_cons, 2, dim=1).values
+        gamma = torch.log((top2_m[:, 0] + 1e-12) / (top2_m[:, 1] + 1e-12))
+        sim_mat = route_aux['sim']
+        pos_sim = torch.diag(sim_mat)
+        neg_sim = sim_mat[route_aux['neg_mask']]
+        last_dump = {
+            'u_sample': u_hat.detach().cpu(),
+            'gamma_sample': gamma.detach().cpu(),
+            'm_top1_sample': top2_m[:, 0].detach().cpu(),
+            'm_gap_sample': (top2_m[:, 0] - top2_m[:, 1]).detach().cpu(),
+            'y_curr_sample': batch_psedo_label.detach().cpu(),
+            'y_prev_sample': (prev_batch.detach().cpu() if prev_batch is not None else torch.full_like(batch_psedo_label.detach().cpu(), -1)),
+            'flip_mask_sample': ((batch_psedo_label != prev_batch).float().detach().cpu() if prev_batch is not None else torch.zeros_like(batch_psedo_label, dtype=torch.float32).detach().cpu()),
+            'S_pair_sample': route_aux['S'][route_aux['neg_mask']].detach().cpu(),
+            'w_pair_sample': route_aux['w_neg'][route_aux['neg_mask']].detach().cpu(),
+            's_post_pair_sample': route_aux['s_post'][route_aux['neg_mask']].detach().cpu(),
+            'sim_pair_sample': neg_sim.detach().cpu(),
+            'rho_fn_pair_sample': route_aux['rho'][route_aux['neg_mask']].float().detach().cpu(),
+            'eta_hn_pair_sample': route_aux['eta'][route_aux['neg_mask']].float().detach().cpu(),
+            'r_pair_sample': route_aux['r'][route_aux['neg_mask']].detach().cpu(),
+            's_stab_pair_sample': route_aux['s_stab'][route_aux['neg_mask']].detach().cpu(),
+            'sim_pos_sample': pos_sim.detach().cpu(),
+            'sim_neg_sample': neg_sim.detach().cpu(),
+        }
+
         print(f"[Epoch {epoch} Batch {batch_idx}] "
               f"Total={total_loss.item():.4f}  "
               f"FN_ratio={route_stats['fn_ratio']:.3f} HN_ratio={route_stats['hn_ratio']:.3f} "
               f"stab={route_stats['stab_rate']:.3f} corr_u_fn={route_stats['corr_u_fn_ratio']:.3f}")
 
     # ===== 训练循环结束 =====
-    return total_loss
+    if batch_count > 0:
+        for k in epoch_meter:
+            epoch_meter[k] /= batch_count
+        for k in route_meter:
+            route_meter[k] /= batch_count
+
+    return {'loss': epoch_meter, 'route': route_meter, 'dump': last_dump, 'gate': gate_val if batch_count > 0 else 0.0}
 
 
 
@@ -406,6 +479,10 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
     mv_loader, num_views, _, num_clusters = get_multiview_data(mv_data, batch_size)
     criterion = torch.nn.MSELoss()
     total_loss = 0.0
+    epoch_meter = {'L_total':0.0,'L_recon':0.0,'L_feat':0.0,'L_cross':0.0,'L_cluster':0.0,'L_uncert':0.0,'L_hn':0.0,'L_reg':0.0}
+    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0}
+    batch_count = 0
+    last_dump = {}
 
     # 1) 课程学习式动态不确定比例
     top_p = initial_top_p * max(0.0, 1.0 - (epoch - 1) / float(max_epoch - 1))
@@ -455,7 +532,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         # ——— Design 1': pair-wise FN 风险路由（停用原 FN/HN MLP 路径）———
         prev_batch = None if y_prev_labels is None else y_prev_labels[sample_idx].to(device)
         route_mask = uncertain if route_uncertain_only else None
-        w_neg, eta_mat, rho_mat, route_stats = _build_pairwise_fn_risk(
+        w_neg, eta_mat, rho_mat, route_stats, route_aux = _build_pairwise_fn_risk(
             common_z=common_z,
             memberships_cons=memberships[num_views],
             u_hat=u_hat,
@@ -530,10 +607,46 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         optimizer.step()
         total_loss += batch_loss.item()
 
-    # 每 5 个 epoch 打印一次
-    if epoch % 5 == 0:
-        print(f"[Epoch {epoch}] total loss: {total_loss:.7f} "
-              f"FN_ratio={route_stats['fn_ratio']:.3f} HN_ratio={route_stats['hn_ratio']:.3f} "
-              f"stab={route_stats['stab_rate']:.3f} corr_u_fn={route_stats['corr_u_fn_ratio']:.3f}")
+        epoch_meter['L_total'] += batch_loss.item()
+        epoch_meter['L_cluster'] += Lcl.item() if hasattr(Lcl, 'item') else float(Lcl)
+        epoch_meter['L_feat'] += Lfeat.item() if hasattr(Lfeat, 'item') else float(Lfeat)
+        epoch_meter['L_uncert'] += Lu.item() if hasattr(Lu, 'item') else float(Lu)
+        epoch_meter['L_hn'] += Lpen.item() if hasattr(Lpen, 'item') else float(Lpen)
+        epoch_meter['L_cross'] += Lcross.item() if ('Lcross' in locals() and hasattr(Lcross, 'item')) else 0.0
+        for k in route_meter:
+            route_meter[k] += route_stats.get(k, 0.0)
+        batch_count += 1
 
-    return total_loss
+        m_cons = memberships[num_views]
+        top2_m = torch.topk(m_cons, 2, dim=1).values
+        gamma = torch.log((top2_m[:, 0] + 1e-12) / (top2_m[:, 1] + 1e-12))
+        sim_mat = route_aux['sim']
+        pos_sim = torch.diag(sim_mat)
+        neg_sim = sim_mat[route_aux['neg_mask']]
+        last_dump = {
+            'u_sample': u_hat.detach().cpu(),
+            'gamma_sample': gamma.detach().cpu(),
+            'm_top1_sample': top2_m[:, 0].detach().cpu(),
+            'm_gap_sample': (top2_m[:, 0] - top2_m[:, 1]).detach().cpu(),
+            'y_curr_sample': batch_label.detach().cpu(),
+            'y_prev_sample': (prev_batch.detach().cpu() if prev_batch is not None else torch.full_like(batch_label.detach().cpu(), -1)),
+            'flip_mask_sample': ((batch_label != prev_batch).float().detach().cpu() if prev_batch is not None else torch.zeros_like(batch_label, dtype=torch.float32).detach().cpu()),
+            'S_pair_sample': route_aux['S'][route_aux['neg_mask']].detach().cpu(),
+            'w_pair_sample': route_aux['w_neg'][route_aux['neg_mask']].detach().cpu(),
+            's_post_pair_sample': route_aux['s_post'][route_aux['neg_mask']].detach().cpu(),
+            'sim_pair_sample': neg_sim.detach().cpu(),
+            'rho_fn_pair_sample': route_aux['rho'][route_aux['neg_mask']].float().detach().cpu(),
+            'eta_hn_pair_sample': route_aux['eta'][route_aux['neg_mask']].float().detach().cpu(),
+            'r_pair_sample': route_aux['r'][route_aux['neg_mask']].detach().cpu(),
+            's_stab_pair_sample': route_aux['s_stab'][route_aux['neg_mask']].detach().cpu(),
+            'sim_pos_sample': pos_sim.detach().cpu(),
+            'sim_neg_sample': neg_sim.detach().cpu(),
+        }
+
+    if batch_count > 0:
+        for k in epoch_meter:
+            epoch_meter[k] /= batch_count
+        for k in route_meter:
+            route_meter[k] /= batch_count
+
+    return {'loss': epoch_meter, 'route': route_meter, 'dump': last_dump, 'gate': gate if batch_count > 0 else 0.0}

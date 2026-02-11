@@ -10,6 +10,7 @@ import os
 import torch
 import numpy as np
 
+
 Dataname = 'RGB-D'
 parser = argparse.ArgumentParser(description='train')
 parser.add_argument('--dataset', default=Dataname,
@@ -60,11 +61,46 @@ parser.add_argument('--hn_beta', default=0.1, type=float,
                     help='Hard-negative quantile in safe negatives.')
 parser.add_argument('--route_uncertain_only', default=True, type=lambda x: x.lower()=='true',
                     help='Apply pair-wise routing only for uncertain anchors.')
+parser.add_argument('--log_dist_interval', default=5, type=int,
+                    help='Epoch interval for DISTR summary and debug dump.')
+parser.add_argument('--save_debug_npz', default=True, type=lambda x: x.lower()=='true',
+                    help='Save debug npz dump periodically.')
+parser.add_argument('--debug_dir', default='debug', type=str,
+                    help='Directory to save debug npz files.')
 args = parser.parse_args()
 
 
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+
+def _qstats(x):
+    x = np.asarray(x).reshape(-1)
+    if x.size == 0:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+    return (float(np.quantile(x, 0.1)), float(np.quantile(x, 0.5)), float(np.quantile(x, 0.9)), float(np.mean(x)), float(np.std(x)))
+
+def _to_np(v):
+    if hasattr(v, 'detach'):
+        return v.detach().cpu().numpy()
+    return np.asarray(v)
+
+def _save_debug_npz(debug_path, dump_dict, cluster_sizes, empty_cluster_count, min_cluster_size, gate_value, loss_dict):
+    os.makedirs(os.path.dirname(debug_path), exist_ok=True)
+    arrays = {}
+    for k, v in dump_dict.items():
+        arr = _to_np(v)
+        arrays[k] = arr
+    arrays.update({
+        'cluster_sizes': np.asarray(cluster_sizes),
+        'empty_cluster_count': np.asarray(empty_cluster_count),
+        'min_cluster_size': np.asarray(min_cluster_size),
+        'gate_value': np.asarray(gate_value),
+    })
+    for lk, lv in loss_dict.items():
+        arrays[lk] = np.asarray(lv)
+    np.savez_compressed(debug_path, **arrays)
 
 def set_seed(seed):
     np.random.seed(seed)
@@ -144,7 +180,7 @@ if __name__ == "__main__":
 
         for epoch in range(1, args.con_epochs + 1):
             y_prev = network.psedo_labels.clone() if epoch > 1 else None
-            total_loss = contrastive_train(
+            train_out = contrastive_train(
                 network, mv_data, mvc_loss,
                 args.batch_size, epoch, W,
                 alpha, beta,
@@ -165,12 +201,72 @@ if __name__ == "__main__":
             )
 
             epoch_list.append(epoch)
-            totalloss_list.append(total_loss)
+            totalloss_list.append(train_out['loss']['L_total'])
 
             # 每轮评估
             acc, nmi, pur, ari, f_score = valid(network, mv_data, num_samples, num_clusters)
             logger.info(f"ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f}")
             print(f"[Epoch {epoch}] ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f}")
+
+            lr = optimizer.param_groups[0]['lr']
+            L = train_out['loss']
+            R = train_out['route']
+            metric_line = (
+                f"METRIC: epoch={epoch} step={epoch} ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f} "
+                f"gate={train_out['gate']:.4f} lr={lr:.6g} temp_f={args.temperature_f:.4f} temp_l={args.temperature_l:.4f} "
+                f"L_total={L['L_total']:.6f} L_recon={L['L_recon']:.6f} L_feat={L['L_feat']:.6f} L_cross={L['L_cross']:.6f} "
+                f"L_cluster={L['L_cluster']:.6f} L_uncert={L['L_uncert']:.6f} L_hn={L['L_hn']:.6f} L_reg={L['L_reg']:.6f}"
+            )
+            counts = np.bincount(network.psedo_labels.detach().cpu().numpy(), minlength=num_clusters)
+            empty_cluster = int((counts == 0).sum())
+            min_cluster = int(counts.min()) if counts.size > 0 else 0
+            route_line = (
+                f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} route_uncertain_only={int(args.route_uncertain_only)} "
+                f"U_size={R['U_size']:.2f} N_size={R['N_size']:.2f} alpha_fn={args.alpha_fn:.4f} pi_fn={args.pi_fn:.4f} "
+                f"w_min={args.w_min:.4f} hn_beta={args.hn_beta:.4f} FN_ratio={R['fn_ratio']:.4f} safe_ratio={R['safe_ratio']:.4f} "
+                f"HN_ratio={R['hn_ratio']:.4f} mean_s_post_FN={R['mean_s_post_fn']:.4f} mean_s_post_nonFN={R['mean_s_post_non_fn']:.4f} "
+                f"delta_post={R['delta_post']:.4f} mean_sim_HN={R['mean_sim_hn']:.4f} mean_sim_safe_nonHN={R['mean_sim_safe_non_hn']:.4f} "
+                f"delta_sim={R['delta_sim']:.4f} label_flip={R['label_flip']:.4f} stab_rate={R['stab_rate']:.4f} "
+                f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={R['denom_fn_share']:.4f} denom_safe_share={R['denom_safe_share']:.4f} "
+                f"w_hit_min_ratio={R['w_hit_min_ratio']:.4f}"
+            )
+            logger.info(metric_line)
+            logger.info(route_line)
+
+            if epoch % args.log_dist_interval == 0:
+                D = train_out.get('dump', {})
+                u_p10, u_p50, u_p90, u_mean, u_std = _qstats(_to_np(D.get('u_sample', np.array([]))))
+                g_p10, g_p50, g_p90, g_mean, g_std = _qstats(_to_np(D.get('gamma_sample', np.array([]))))
+                S_p10, S_p50, S_p90, S_mean, S_std = _qstats(_to_np(D.get('S_pair_sample', np.array([]))))
+                w_p10, w_p50, w_p90, w_mean, w_std = _qstats(_to_np(D.get('w_pair_sample', np.array([]))))
+                sp50, _, sp90, _, _ = _qstats(_to_np(D.get('sim_pos_sample', np.array([]))))
+                _, _, sn90, _, _ = _qstats(_to_np(D.get('sim_neg_sample', np.array([]))))
+                sn99 = float(np.quantile(_to_np(D.get('sim_neg_sample', np.array([0.0]))).reshape(-1), 0.99))
+                mt10, mt50, mt90, _, _ = _qstats(_to_np(D.get('m_top1_sample', np.array([]))))
+                mg10, mg50, mg90, _, _ = _qstats(_to_np(D.get('m_gap_sample', np.array([]))))
+                distr_line = (
+                    f"DISTR: epoch={epoch} u_p10={u_p10:.4f} u_p50={u_p50:.4f} u_p90={u_p90:.4f} u_mean={u_mean:.4f} u_std={u_std:.4f} "
+                    f"gamma_p10={g_p10:.4f} gamma_p50={g_p50:.4f} gamma_p90={g_p90:.4f} gamma_mean={g_mean:.4f} gamma_std={g_std:.4f} "
+                    f"S_p10={S_p10:.4f} S_p50={S_p50:.4f} S_p90={S_p90:.4f} S_mean={S_mean:.4f} S_std={S_std:.4f} "
+                    f"w_p10={w_p10:.4f} w_p50={w_p50:.4f} w_p90={w_p90:.4f} w_mean={w_mean:.4f} w_std={w_std:.4f} "
+                    f"sim_pos_p50={sp50:.4f} sim_pos_p90={sp90:.4f} sim_neg_p90={sn90:.4f} sim_neg_p99={sn99:.4f} "
+                    f"m_top1_p10={mt10:.4f} m_top1_p50={mt50:.4f} m_top1_p90={mt90:.4f} "
+                    f"m_gap_p10={mg10:.4f} m_gap_p50={mg50:.4f} m_gap_p90={mg90:.4f}"
+                )
+                logger.info(distr_line)
+
+                if args.save_debug_npz:
+                    counts = np.bincount(network.psedo_labels.detach().cpu().numpy(), minlength=num_clusters)
+                    debug_path = os.path.join(args.debug_dir, f"debug_epoch_{epoch:03d}.npz")
+                    _save_debug_npz(
+                        debug_path,
+                        D,
+                        cluster_sizes=counts,
+                        empty_cluster_count=int((counts == 0).sum()),
+                        min_cluster_size=int(counts.min()) if counts.size > 0 else 0,
+                        gate_value=train_out['gate'],
+                        loss_dict=L,
+                    )
 
             acc_list.append(acc)
             nmi_list.append(nmi)
@@ -225,7 +321,7 @@ if __name__ == "__main__":
         y_prev = None
         for epoch in range(1, args.con_epochs + 1):
             y_prev = network.psedo_labels.clone() if epoch > 1 else None
-            total_loss = contrastive_largedatasetstrain(
+            train_out = contrastive_largedatasetstrain(
                 network, mv_data, mvc_loss,
                 args.batch_size, epoch,
                 args.k, alpha, beta, optimizer,
@@ -248,6 +344,66 @@ if __name__ == "__main__":
             acc, nmi, pur, ari, f_score = valid(network, mv_data, num_samples, num_clusters)
             logger.info(f"ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f}")
             print(f"[Epoch {epoch}] ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f}")
+
+            lr = optimizer.param_groups[0]['lr']
+            L = train_out['loss']
+            R = train_out['route']
+            metric_line = (
+                f"METRIC: epoch={epoch} step={epoch} ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f} "
+                f"gate={train_out['gate']:.4f} lr={lr:.6g} temp_f={args.temperature_f:.4f} temp_l={args.temperature_l:.4f} "
+                f"L_total={L['L_total']:.6f} L_recon={L['L_recon']:.6f} L_feat={L['L_feat']:.6f} L_cross={L['L_cross']:.6f} "
+                f"L_cluster={L['L_cluster']:.6f} L_uncert={L['L_uncert']:.6f} L_hn={L['L_hn']:.6f} L_reg={L['L_reg']:.6f}"
+            )
+            counts = np.bincount(network.psedo_labels.detach().cpu().numpy(), minlength=num_clusters)
+            empty_cluster = int((counts == 0).sum())
+            min_cluster = int(counts.min()) if counts.size > 0 else 0
+            route_line = (
+                f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} route_uncertain_only={int(args.route_uncertain_only)} "
+                f"U_size={R['U_size']:.2f} N_size={R['N_size']:.2f} alpha_fn={args.alpha_fn:.4f} pi_fn={args.pi_fn:.4f} "
+                f"w_min={args.w_min:.4f} hn_beta={args.hn_beta:.4f} FN_ratio={R['fn_ratio']:.4f} safe_ratio={R['safe_ratio']:.4f} "
+                f"HN_ratio={R['hn_ratio']:.4f} mean_s_post_FN={R['mean_s_post_fn']:.4f} mean_s_post_nonFN={R['mean_s_post_non_fn']:.4f} "
+                f"delta_post={R['delta_post']:.4f} mean_sim_HN={R['mean_sim_hn']:.4f} mean_sim_safe_nonHN={R['mean_sim_safe_non_hn']:.4f} "
+                f"delta_sim={R['delta_sim']:.4f} label_flip={R['label_flip']:.4f} stab_rate={R['stab_rate']:.4f} "
+                f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={R['denom_fn_share']:.4f} denom_safe_share={R['denom_safe_share']:.4f} "
+                f"w_hit_min_ratio={R['w_hit_min_ratio']:.4f}"
+            )
+            logger.info(metric_line)
+            logger.info(route_line)
+
+            if epoch % args.log_dist_interval == 0:
+                D = train_out.get('dump', {})
+                u_p10, u_p50, u_p90, u_mean, u_std = _qstats(_to_np(D.get('u_sample', np.array([]))))
+                g_p10, g_p50, g_p90, g_mean, g_std = _qstats(_to_np(D.get('gamma_sample', np.array([]))))
+                S_p10, S_p50, S_p90, S_mean, S_std = _qstats(_to_np(D.get('S_pair_sample', np.array([]))))
+                w_p10, w_p50, w_p90, w_mean, w_std = _qstats(_to_np(D.get('w_pair_sample', np.array([]))))
+                sp50, _, sp90, _, _ = _qstats(_to_np(D.get('sim_pos_sample', np.array([]))))
+                _, _, sn90, _, _ = _qstats(_to_np(D.get('sim_neg_sample', np.array([]))))
+                sn99 = float(np.quantile(_to_np(D.get('sim_neg_sample', np.array([0.0]))).reshape(-1), 0.99))
+                mt10, mt50, mt90, _, _ = _qstats(_to_np(D.get('m_top1_sample', np.array([]))))
+                mg10, mg50, mg90, _, _ = _qstats(_to_np(D.get('m_gap_sample', np.array([]))))
+                distr_line = (
+                    f"DISTR: epoch={epoch} u_p10={u_p10:.4f} u_p50={u_p50:.4f} u_p90={u_p90:.4f} u_mean={u_mean:.4f} u_std={u_std:.4f} "
+                    f"gamma_p10={g_p10:.4f} gamma_p50={g_p50:.4f} gamma_p90={g_p90:.4f} gamma_mean={g_mean:.4f} gamma_std={g_std:.4f} "
+                    f"S_p10={S_p10:.4f} S_p50={S_p50:.4f} S_p90={S_p90:.4f} S_mean={S_mean:.4f} S_std={S_std:.4f} "
+                    f"w_p10={w_p10:.4f} w_p50={w_p50:.4f} w_p90={w_p90:.4f} w_mean={w_mean:.4f} w_std={w_std:.4f} "
+                    f"sim_pos_p50={sp50:.4f} sim_pos_p90={sp90:.4f} sim_neg_p90={sn90:.4f} sim_neg_p99={sn99:.4f} "
+                    f"m_top1_p10={mt10:.4f} m_top1_p50={mt50:.4f} m_top1_p90={mt90:.4f} "
+                    f"m_gap_p10={mg10:.4f} m_gap_p50={mg50:.4f} m_gap_p90={mg90:.4f}"
+                )
+                logger.info(distr_line)
+
+                if args.save_debug_npz:
+                    counts = np.bincount(network.psedo_labels.detach().cpu().numpy(), minlength=num_clusters)
+                    debug_path = os.path.join(args.debug_dir, f"debug_epoch_{epoch:03d}.npz")
+                    _save_debug_npz(
+                        debug_path,
+                        D,
+                        cluster_sizes=counts,
+                        empty_cluster_count=int((counts == 0).sum()),
+                        min_cluster_size=int(counts.min()) if counts.size > 0 else 0,
+                        gate_value=train_out['gate'],
+                        loss_dict=L,
+                    )
 
             acc_list.append(acc)
             nmi_list.append(nmi)

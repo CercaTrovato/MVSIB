@@ -46,6 +46,20 @@ parser.add_argument('--uncertainty_temperature', default=0.5, type=float,
                     help='Temperature T_u for uncertainty sigmoid mapping.')
 parser.add_argument('--reliability_temperature', default=0.5, type=float,
                     help='Temperature T_w for reliability-weighted view fusion.')
+parser.add_argument('--neg_mode', default='batch', type=str, choices=['batch', 'knn'],
+                    help='Negative candidate mode for pair-wise FN risk routing.')
+parser.add_argument('--knn_neg_k', default=20, type=int,
+                    help='k in kNN negatives when neg_mode=knn.')
+parser.add_argument('--alpha_fn', default=0.1, type=float,
+                    help='Top-risk quantile ratio for FN-risk negatives.')
+parser.add_argument('--pi_fn', default=0.1, type=float,
+                    help='FN-risk negative downweight strength.')
+parser.add_argument('--w_min', default=0.05, type=float,
+                    help='Minimum negative weight for high FN-risk pairs.')
+parser.add_argument('--hn_beta', default=0.1, type=float,
+                    help='Hard-negative quantile in safe negatives.')
+parser.add_argument('--route_uncertain_only', default=True, type=lambda x: x.lower()=='true',
+                    help='Apply pair-wise routing only for uncertain anchors.')
 args = parser.parse_args()
 
 
@@ -126,8 +140,10 @@ if __name__ == "__main__":
     if not args.large_datasets:
         W = get_W(mv_data, k=args.k)
         mv_loader, _, _, _ = get_multiview_data(mv_data, args.batch_size)
+        y_prev = None
 
         for epoch in range(1, args.con_epochs + 1):
+            y_prev = network.psedo_labels.clone() if epoch > 1 else None
             total_loss = contrastive_train(
                 network, mv_data, mvc_loss,
                 args.batch_size, epoch, W,
@@ -137,7 +153,15 @@ if __name__ == "__main__":
                 args.lambda_u,
                 args.lambda_hn_penalty,
                 args.temperature_f,
-                cross_warmup_epochs=args.cross_warmup_epochs
+                cross_warmup_epochs=args.cross_warmup_epochs,
+                alpha_fn=args.alpha_fn,
+                pi_fn=args.pi_fn,
+                w_min=args.w_min,
+                hn_beta=args.hn_beta,
+                neg_mode=args.neg_mode,
+                knn_neg_k=args.knn_neg_k,
+                route_uncertain_only=args.route_uncertain_only,
+                y_prev_labels=y_prev,
             )
 
             epoch_list.append(epoch)
@@ -198,7 +222,9 @@ if __name__ == "__main__":
         best_epoch = -1
         best_metrics = None
 
+        y_prev = None
         for epoch in range(1, args.con_epochs + 1):
+            y_prev = network.psedo_labels.clone() if epoch > 1 else None
             total_loss = contrastive_largedatasetstrain(
                 network, mv_data, mvc_loss,
                 args.batch_size, epoch,
@@ -207,7 +233,15 @@ if __name__ == "__main__":
                 lambda_u=args.lambda_u,
                 lambda_hn_penalty=args.lambda_hn_penalty,
                 temperature_f=args.temperature_f,
-                cross_warmup_epochs=args.cross_warmup_epochs
+                cross_warmup_epochs=args.cross_warmup_epochs,
+                alpha_fn=args.alpha_fn,
+                pi_fn=args.pi_fn,
+                w_min=args.w_min,
+                hn_beta=args.hn_beta,
+                neg_mode=args.neg_mode,
+                knn_neg_k=args.knn_neg_k,
+                route_uncertain_only=args.route_uncertain_only,
+                y_prev_labels=y_prev,
             )
 
 

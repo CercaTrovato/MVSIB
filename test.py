@@ -21,11 +21,14 @@ input_sizes = np.zeros(num_views, dtype=int)
 for idx in range(num_views):
     input_sizes[idx] = mv_data.data_views[idx].shape[1]
 
-network = Network(num_views, num_samples, num_clusters, input_sizes, args.feature_dim)
+network = Network(num_views, num_samples, num_clusters, device, input_sizes, args.feature_dim)
 network = network.to(device)
-checkpoint = torch.load('./models/%s.pth' % args.dataset)
+checkpoint = torch.load('./models/%s.pth' % args.dataset, map_location=device)
 
-network.load_state_dict(checkpoint)
+if isinstance(checkpoint, dict) and 'network_state_dict' in checkpoint:
+    network.load_state_dict(checkpoint['network_state_dict'])
+else:
+    network.load_state_dict(checkpoint)
 print("Dataset:{}".format(args.dataset))
 print("Loading models...")
-valid(network, mv_data, num_samples)
+valid(network, mv_data, num_samples, num_clusters)

@@ -114,12 +114,9 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
 
     # (E2) stability evidence
     if prev_labels_batch is None:
-        stab_vec = torch.zeros(N, device=device)
-        assign_stability = 0.0
         s_stab = torch.zeros(N, N, device=device)
     else:
-        stab_vec = _aligned_assignment_stability(batch_labels, prev_labels_batch).to(device)
-        assign_stability = stab_vec.mean().item()
+        stab_vec = (batch_labels == prev_labels_batch).float()
         s_stab = torch.ger(stab_vec, stab_vec)
 
     # (E3) reliability from uncertainty
@@ -208,28 +205,23 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
     denom_fn = (w_neg * exp_sim * rho.float()).sum()
     denom_fn_share = (denom_fn / denom_all).item()
 
-    routed_anchor = uncertain_mask if uncertain_mask is not None else torch.ones(N, dtype=torch.bool, device=device)
-    routed_anchor_mask = routed_anchor.unsqueeze(1).expand_as(neg_mask)
-    routed_neg_mask = neg_mask & routed_anchor_mask
-    routed_safe_mask = safe_mask & routed_anchor_mask
-    fn_mask = routed_neg_mask & rho
-    hn_mask = routed_safe_mask & eta
+    fn_mask = neg_mask & rho
+    hn_mask = safe_mask & eta
     fn_count = fn_mask.float().sum().item()
     hn_count = hn_mask.float().sum().item()
-    neg_count = routed_neg_mask.float().sum().item()
-    safe_neg_count = routed_safe_mask.float().sum().item()
-    candidate_neg_size = (routed_anchor.float().sum().item() * max(N - 1, 0))
+    neg_count = neg_mask.float().sum().item()
+    safe_neg_count = safe_mask.float().sum().item()
 
     stats = {
-        'fn_ratio': (fn_count / max(neg_count, 1.0)),
-        'safe_ratio': (safe_neg_count / max(neg_count, 1.0)),
-        'hn_ratio': (hn_count / max(safe_neg_count, 1.0)),
+        'fn_ratio': torch.stack(fn_ratio_list).mean().item() if fn_ratio_list else 0.0,
+        'safe_ratio': ((safe_mask.float().sum() / (neg_mask.float().sum() + eps))).item(),
+        'hn_ratio': torch.stack(hn_ratio_list).mean().item() if hn_ratio_list else 0.0,
         'FN_count': fn_count,
         'HN_count': hn_count,
         'neg_count': neg_count,
         'safe_neg_count': safe_neg_count,
-        'candidate_neg_size': candidate_neg_size,
-        'neg_after_filter_size': neg_count,
+        'candidate_neg_size': neg_count,
+        'neg_after_filter_size': safe_neg_count,
         'neg_used_in_loss_size': neg_count,
         'w_mean_on_FN': w_neg[rho].mean().item() if rho.any() else 0.0,
         'w_mean_on_safe': w_neg[safe_mask].mean().item() if safe_mask.any() else 0.0,
@@ -239,9 +231,8 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
         'mean_sim_hn': mean_sim_hn,
         'mean_sim_safe_non_hn': mean_sim_safe_non_hn,
         'delta_sim': mean_sim_hn - mean_sim_safe_non_hn,
-        'label_flip': (1.0 - assign_stability) if prev_labels_batch is not None else 0.0,
-        'stab_rate': assign_stability if prev_labels_batch is not None else 0.0,
-        'assignment_stability': assign_stability if prev_labels_batch is not None else 0.0,
+        'label_flip': (1.0 - s_stab.diag().mean().item()) if prev_labels_batch is not None else 0.0,
+        'stab_rate': s_stab.diag().mean().item() if prev_labels_batch is not None else 0.0,
         'denom_fn_share': denom_fn_share,
         'denom_safe_share': 1.0 - denom_fn_share,
         'w_hit_min_ratio': ((w_neg <= (w_min + eps)) & rho).float().mean().item() if rho.any() else 0.0,
@@ -251,14 +242,6 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
         'U_size': int(uncertain_mask.sum().item()) if uncertain_mask is not None else int(N),
         'fn_pair_share': (fn_count / max(neg_count, 1.0)),
         'hn_pair_share': (hn_count / max(safe_neg_count, 1.0)),
-        'tau_fn_p10': torch.nanquantile(tau_fn_per_anchor, 0.1).item() if torch.isfinite(tau_fn_per_anchor).any() else 0.0,
-        'tau_fn_p50': torch.nanquantile(tau_fn_per_anchor, 0.5).item() if torch.isfinite(tau_fn_per_anchor).any() else 0.0,
-        'tau_fn_p90': torch.nanquantile(tau_fn_per_anchor, 0.9).item() if torch.isfinite(tau_fn_per_anchor).any() else 0.0,
-        'tau_hn_p10': torch.nanquantile(tau_hn_per_anchor, 0.1).item() if torch.isfinite(tau_hn_per_anchor).any() else 0.0,
-        'tau_hn_p50': torch.nanquantile(tau_hn_per_anchor, 0.5).item() if torch.isfinite(tau_hn_per_anchor).any() else 0.0,
-        'tau_hn_p90': torch.nanquantile(tau_hn_per_anchor, 0.9).item() if torch.isfinite(tau_hn_per_anchor).any() else 0.0,
-        'FN_count_anchor_p50': torch.quantile(fn_count_per_anchor, 0.5).item() if fn_count_per_anchor.numel() > 0 else 0.0,
-        'HN_count_anchor_p50': torch.quantile(hn_count_per_anchor, 0.5).item() if hn_count_per_anchor.numel() > 0 else 0.0,
     }
     aux = {
         'S': S, 's_post': s_post, 'sim': sim, 'rho': rho, 'eta': eta, 'w_neg': w_neg,
@@ -268,24 +251,6 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
     }
     return w_neg, eta, rho, stats, aux
 
-
-
-
-def _aligned_assignment_stability(batch_labels, prev_labels_batch):
-    """对齐簇ID后计算伪标签稳定性，缓解簇编号置换导致的虚假翻转。"""
-    if prev_labels_batch is None:
-        return None
-    curr = batch_labels.detach().clone()
-    prev = prev_labels_batch.detach().clone()
-    mapped = curr.clone()
-    for c in curr.unique():
-        m = (curr == c)
-        prev_on_c = prev[m]
-        if prev_on_c.numel() == 0:
-            continue
-        vals, cnts = prev_on_c.unique(return_counts=True)
-        mapped[m] = vals[cnts.argmax()]
-    return (mapped == prev).float()
 
 def contrastive_train(model, mv_data, mvc_loss,
                       batch_size, epoch, W,
@@ -305,9 +270,7 @@ def contrastive_train(model, mv_data, mvc_loss,
                       route_uncertain_only=True,
                       y_prev_labels=None,
                       p_min=0.05,
-                      u_min=32,
-                      lambda_cross=1.0,
-                      cross_ramp_epochs=10):
+                      u_min=32):
     model.train()
     mv_data_loader, num_views, num_samples, num_clusters = get_multiview_data(mv_data, batch_size)
 
@@ -329,7 +292,7 @@ def contrastive_train(model, mv_data, mvc_loss,
     criterion = torch.nn.MSELoss()  # 添加重建损失的损失函数
 
     epoch_meter = {'L_total':0.0,'L_recon':0.0,'L_feat':0.0,'L_cross':0.0,'L_cluster':0.0,'L_uncert':0.0,'L_hn':0.0,'L_reg':0.0}
-    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'assignment_stability':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'neg_per_anchor':0.0,'FN_count':0.0,'HN_count':0.0,'neg_count':0.0,'safe_neg_count':0.0,'candidate_neg_size':0.0,'neg_after_filter_size':0.0,'neg_used_in_loss_size':0.0,'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':0.0,'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'U_ratio':0.0,'u_thr':0.0,'top_p_e':0.0,'k_unc':0.0}
+    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'neg_per_anchor':0.0,'FN_count':0.0,'HN_count':0.0,'neg_count':0.0,'safe_neg_count':0.0,'candidate_neg_size':0.0,'neg_after_filter_size':0.0,'neg_used_in_loss_size':0.0,'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':0.0,'U_ratio':0.0,'u_thr':0.0,'top_p_e':0.0,'k_unc':0.0}
     batch_count = 0
     last_dump = {}
 
@@ -455,9 +418,7 @@ def contrastive_train(model, mv_data, mvc_loss,
                     model, zs, common_z, memberships,
                     batch_psedo_label, temperature=temperature_f
                 )
-                cross_l = cross_l / max(float(num_views), 1.0)
-                cross_ramp = min(1.0, max(0.0, (epoch - cross_warmup_epochs) / float(max(1, cross_ramp_epochs))))
-                Lcross_i = gate_fn * beta * lambda_cross * cross_ramp * cross_l
+                Lcross_i = gate_fn * beta  * cross_l
                 Lcross += Lcross_i.item()
                 loss_list.append(Lcross_i)
 
@@ -569,9 +530,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                                    route_uncertain_only=True,
                                    y_prev_labels=None,
                                    p_min=0.05,
-                                   u_min=32,
-                                   lambda_cross=1.0,
-                                   cross_ramp_epochs=10):
+                                   u_min=32):
     """
     大数据集版 Contrastive Training：
     - k: 用于构建每个视图下的 k-NN 图
@@ -582,7 +541,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
     criterion = torch.nn.MSELoss()
     total_loss = 0.0
     epoch_meter = {'L_total':0.0,'L_recon':0.0,'L_feat':0.0,'L_cross':0.0,'L_cluster':0.0,'L_uncert':0.0,'L_hn':0.0,'L_reg':0.0}
-    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'assignment_stability':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'neg_per_anchor':0.0,'FN_count':0.0,'HN_count':0.0,'neg_count':0.0,'safe_neg_count':0.0,'candidate_neg_size':0.0,'neg_after_filter_size':0.0,'neg_used_in_loss_size':0.0,'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':0.0,'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'U_ratio':0.0,'u_thr':0.0,'top_p_e':0.0,'k_unc':0.0}
+    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'neg_per_anchor':0.0,'FN_count':0.0,'HN_count':0.0,'neg_count':0.0,'safe_neg_count':0.0,'candidate_neg_size':0.0,'neg_after_filter_size':0.0,'neg_used_in_loss_size':0.0,'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':0.0,'U_ratio':0.0,'u_thr':0.0,'top_p_e':0.0,'k_unc':0.0}
     batch_count = 0
     last_dump = {}
 
@@ -705,9 +664,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                     model, zs, common_z, memberships,
                     batch_label, temperature=temperature_f
                 )
-                cross_l = cross_l / max(float(num_views), 1.0)
-                cross_ramp = min(1.0, max(0.0, (epoch - cross_warmup_epochs) / float(max(1, cross_ramp_epochs))))
-                Lcross = gate_fn * beta * lambda_cross * prog * cross_ramp * cross_l
+                Lcross = gate_fn * beta * prog * cross_l
                 batch_loss += Lcross
 
         # ——— 梯度更新 ———

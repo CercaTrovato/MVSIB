@@ -1,0 +1,440 @@
+[
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 3,
+    "detail": "label_flip=0.981, stab_rate=0.019"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 5,
+    "detail": "label_flip=0.973, stab_rate=0.027"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 13,
+    "detail": "label_flip=0.995, stab_rate=0.005"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 18,
+    "detail": "label_flip=0.995, stab_rate=0.005"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 20,
+    "detail": "label_flip=0.998, stab_rate=0.002"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 21,
+    "detail": "label_flip=0.998, stab_rate=0.002"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 26,
+    "detail": "label_flip=0.995, stab_rate=0.005"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 27,
+    "detail": "label_flip=0.998, stab_rate=0.002"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 29,
+    "detail": "label_flip=0.983, stab_rate=0.017"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 33,
+    "detail": "label_flip=0.998, stab_rate=0.002"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 48,
+    "detail": "label_flip=0.972, stab_rate=0.028"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 51,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 52,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 53,
+    "detail": "label_flip=0.999, stab_rate=0.001"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 53,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 54,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 55,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 56,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 57,
+    "detail": "label_flip=0.994, stab_rate=0.006"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 57,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 58,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 59,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 60,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 61,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 62,
+    "detail": "label_flip=0.996, stab_rate=0.004"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 62,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 63,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 64,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 65,
+    "detail": "label_flip=0.975, stab_rate=0.025"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 65,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 66,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 67,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 68,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 69,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 70,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 71,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 72,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 73,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 74,
+    "detail": "label_flip=0.962, stab_rate=0.038"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 74,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 75,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 76,
+    "detail": "label_flip=1.000, stab_rate=0.000"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 76,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 77,
+    "detail": "label_flip=0.999, stab_rate=0.001"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 77,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 78,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 79,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 80,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 81,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 82,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 83,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "WARN",
+    "rule": "tiny_cluster",
+    "epoch": 83,
+    "detail": "min_cluster=9.0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 84,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "WARN",
+    "rule": "tiny_cluster",
+    "epoch": 84,
+    "detail": "min_cluster=9.0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 85,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 86,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 87,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 88,
+    "detail": "label_flip=0.986, stab_rate=0.014"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 88,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 89,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 90,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 91,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 92,
+    "detail": "label_flip=1.000, stab_rate=0.000"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 92,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 93,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 94,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 95,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "WARN",
+    "rule": "route_instability",
+    "epoch": 96,
+    "detail": "label_flip=1.000, stab_rate=0.000"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 96,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 97,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 98,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 99,
+    "detail": "w_hit_min_ratio=0"
+  },
+  {
+    "level": "INFO",
+    "rule": "w_hit_min_zero",
+    "epoch": 100,
+    "detail": "w_hit_min_ratio=0"
+  }
+]

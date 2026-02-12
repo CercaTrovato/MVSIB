@@ -1,0 +1,107 @@
+{
+  "args": {
+    "dataset": "RGB-D",
+    "save_model": false,
+    "batch_size": 256,
+    "temperature_f": 0.5,
+    "temperature_l": 0.5,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.0,
+    "mse_epochs": 200,
+    "con_epochs": 100,
+    "feature_dim": 256,
+    "large_datasets": false,
+    "k": 10,
+    "gpu": "0",
+    "warmup_epochs": 20,
+    "lambda_u": 0.1,
+    "lambda_hn_penalty": 0.1,
+    "cross_warmup_epochs": 50,
+    "membership_mode": "softmax_distance",
+    "membership_temperature": 1.0,
+    "uncertainty_mode": "log_odds",
+    "uncertainty_kappa": 1.0,
+    "uncertainty_temperature": 0.5,
+    "reliability_temperature": 0.5,
+    "neg_mode": "batch",
+    "knn_neg_k": 20,
+    "alpha_fn": 0.1,
+    "pi_fn": 0.1,
+    "w_min": 0.05,
+    "hn_beta": 0.1,
+    "route_uncertain_only": true,
+    "log_dist_interval": 5,
+    "save_debug_npz": true,
+    "debug_dir": "debug",
+    "seed": 5
+  },
+  "phase_stat": {
+    "phase0_warmup": {
+      "ACC": 0.451245,
+      "F1": 0.362405,
+      "L_total": 8.45099855,
+      "L_cross": 0.0,
+      "L_feat": 8.381817000000002,
+      "FN_ratio": 0.040749999999999995,
+      "HN_ratio": 0.025789999999999997,
+      "gate": 0.09595000000000001,
+      "L_cross_ratio": 0.0,
+      "L_feat_ratio": 0.991813801695659
+    },
+    "phase1_transition": {
+      "ACC": 0.5331233333333334,
+      "F1": 0.4501933333333334,
+      "L_total": 5.8929129666666675,
+      "L_cross": 0.0,
+      "L_feat": 5.836712666666668,
+      "FN_ratio": 0.019830000000000004,
+      "HN_ratio": 0.01974333333333334,
+      "gate": 0.34845,
+      "L_cross_ratio": 0.0,
+      "L_feat_ratio": 0.9904630697385322
+    },
+    "phase2_cross": {
+      "ACC": 0.518296,
+      "F1": 0.43505000000000005,
+      "L_total": 25.570899040000004,
+      "L_cross": 18.88831254,
+      "L_feat": 5.03356802,
+      "FN_ratio": 0.013954000000000001,
+      "HN_ratio": 0.013952000000000003,
+      "gate": 0.7525499999999999,
+      "L_cross_ratio": 0.7386643899556845,
+      "L_feat_ratio": 0.19684751842812012
+    }
+  },
+  "mechanism": {
+    "corr_FNratio_fnPairShare": 1.0,
+    "corr_HNratio_hnPairShare": 0.9999680909410791,
+    "corr_deltaPost_Sp50": -0.8521476378023338,
+    "corr_ACC_simNegP99": 0.8259572679892322,
+    "corr_ACC_mgapP10": -0.16197598324005882,
+    "corr_ACC_Lcross": 0.17638793728002078
+  },
+  "event_counts": {
+    "ERROR": 0,
+    "WARN": 23,
+    "INFO": 50
+  },
+  "phases": [
+    [
+      "phase0_warmup",
+      1,
+      20
+    ],
+    [
+      "phase1_transition",
+      21,
+      50
+    ],
+    [
+      "phase2_cross",
+      51,
+      100
+    ]
+  ],
+  "log": "..\\log\\RGB-D==2026-02-12_18-17-46.log"
+}

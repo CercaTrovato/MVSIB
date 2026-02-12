@@ -378,34 +378,34 @@ def plot_dashboard(rows: List[Dict[str, Any]], phases: List[Tuple[str, int, int]
 
     axes[0, 0].plot(ep, acc, label="ACC")
     axes[0, 0].plot(ep, f1, label="F1")
-    axes[0, 0].set_title("性能曲线")
+    axes[0, 0].set_title("Performance Curves")
     axes[0, 0].legend()
 
     axes[0, 1].plot(ep, ltot, label="L_total")
     ax2 = axes[0, 1].twinx()
     ax2.plot(ep, ratio, color="tab:red", label="L_cross/L_total")
-    axes[0, 1].set_title("总损失与跨视图占比")
+    axes[0, 1].set_title("Total Loss and Cross-view Ratio")
 
     axes[1, 0].plot(ep, fnr, label="FN_ratio")
     axes[1, 0].plot(ep, hnr, label="HN_ratio")
-    axes[1, 0].set_title("ROUTE 比率")
+    axes[1, 0].set_title("ROUTE Ratios")
     axes[1, 0].legend()
 
     axes[1, 1].plot(ep, cand, label="candidate")
     axes[1, 1].plot(ep, flt, label="after_filter")
     axes[1, 1].plot(ep, used, label="used_in_loss")
-    axes[1, 1].set_title("负样本链路规模")
+    axes[1, 1].set_title("Negative Pool Flow")
     axes[1, 1].legend()
 
     axes[2, 0].plot(ep, up50, label="u_p50")
     axes[2, 0].plot(ep, gp50, label="gamma_p50")
     axes[2, 0].plot(ep, sp50, label="S_p50")
-    axes[2, 0].set_title("DISTR 机制观测")
+    axes[2, 0].set_title("DISTR Mechanism Signals")
     axes[2, 0].legend()
 
     axes[2, 1].plot(ep, inc, label="route_inconsistent")
     axes[2, 1].plot(ep, empty, label="empty_cluster")
-    axes[2, 1].set_title("一致性与聚类健康")
+    axes[2, 1].set_title("Consistency and Cluster Health")
     axes[2, 1].legend()
 
     for _, lo, hi in phases:
@@ -442,7 +442,7 @@ def plot_loss_ratio(rows: List[Dict[str, Any]], out_png: Path) -> None:
     plt.figure(figsize=(12, 6))
     for key in ["L_cross", "L_feat", "L_cluster", "L_uncert", "L_hn"]:
         plt.plot(ep, ratio(key), label=f"{key}/L_total")
-    plt.title("Loss 占比曲线")
+    plt.title("Loss Contribution Ratios")
     plt.xlabel("epoch")
     plt.ylabel("ratio")
     plt.legend()
@@ -545,8 +545,8 @@ def main() -> None:
     save_events_json(out_dir / "validation_report.json", events)
     write_report_md(out_dir / "summary.md", parsed.args_dict, phase_stat, mech, events, merged)
 
-    plot_dashboard(merged, phases, out_dir / "01_overview_phase_dashboard.png")
-    plot_loss_ratio(merged, out_dir / "02_loss_contribution_ratio.png")
+    plot_dashboard(merged, phases, out_dir / "01_overview_phase_dashboard.svg")
+    plot_loss_ratio(merged, out_dir / "02_loss_contribution_ratio.svg")
 
     # 机器可读总体摘要
     payload = {

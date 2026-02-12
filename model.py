@@ -205,8 +205,10 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
     denom_fn = (w_neg * exp_sim * rho.float()).sum()
     denom_fn_share = (denom_fn / denom_all).item()
 
-    fn_count = rho.float().sum().item()
-    hn_count = eta.float().sum().item()
+    fn_mask = neg_mask & rho
+    hn_mask = safe_mask & eta
+    fn_count = fn_mask.float().sum().item()
+    hn_count = hn_mask.float().sum().item()
     neg_count = neg_mask.float().sum().item()
     safe_neg_count = safe_mask.float().sum().item()
 
@@ -235,8 +237,8 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
         'N_size': (neg_mask.float().sum(dim=1).mean().item()),
         'neg_per_anchor': (neg_mask.float().sum(dim=1).mean().item()),
         'U_size': int(uncertain_mask.sum().item()) if uncertain_mask is not None else int(N),
-        'fn_pair_share': rho[neg_mask].float().mean().item() if neg_mask.any() else 0.0,
-        'hn_pair_share': eta[neg_mask].float().mean().item() if neg_mask.any() else 0.0,
+        'fn_pair_share': (fn_count / max(neg_count, 1.0)),
+        'hn_pair_share': (hn_count / max(safe_neg_count, 1.0)),
     }
     aux = {
         'S': S, 's_post': s_post, 'sim': sim, 'rho': rho, 'eta': eta, 'w_neg': w_neg,
@@ -263,7 +265,9 @@ def contrastive_train(model, mv_data, mvc_loss,
                       neg_mode='batch',
                       knn_neg_k=20,
                       route_uncertain_only=True,
-                      y_prev_labels=None):
+                      y_prev_labels=None,
+                      p_min=0.05,
+                      u_min=32):
     model.train()
     mv_data_loader, num_views, num_samples, num_clusters = get_multiview_data(mv_data, batch_size)
 
@@ -272,7 +276,7 @@ def contrastive_train(model, mv_data, mvc_loss,
     all_labels = []  # 用于收集每个批次的标签
 
     # 课程学习式动态不确定比例
-    top_p_e = initial_top_p * max(0.0, 1.0 - (epoch - 1) / float(max_epoch - 1))
+    top_p_e = max(p_min, initial_top_p * max(0.0, 1.0 - (epoch - 1) / float(max_epoch - 1)))
 
     # E 步：更新全量伪标签
     psedo_labeling(model, mv_data, batch_size)
@@ -312,7 +316,7 @@ def contrastive_train(model, mv_data, mvc_loss,
         batch_N  = u_hat.size(0)
 
         # ——— 4) 课程学习式不确定划分 ———
-        k_unc = max(1, int(batch_N * top_p_e))
+        k_unc = max(min(u_min, batch_N), int(batch_N * top_p_e))
         _, idx_topk = torch.topk(u_hat, k_unc, largest=True)
         uncertain_mask = torch.zeros(batch_N, dtype=torch.bool, device=device)
         uncertain_mask[idx_topk] = True
@@ -324,7 +328,11 @@ def contrastive_train(model, mv_data, mvc_loss,
         u_mean = u_hat.mean().item()
         mu_start, mu_end = 0.3, 0.7
         raw_gate = (u_mean - mu_start) / (mu_end - mu_start)
-        gate_val = float(max(0.0, min(1.0, raw_gate)))
+        gate_u = float(max(0.0, min(1.0, raw_gate)))
+        t = float((epoch - 1) / max(1, max_epoch - 1))
+        gate_fn = t
+        gate_hn = t
+        gate_val = t
         gate = torch.tensor(gate_val, device=device)
 
         # ——— 6) 计算共识中心 q_centers ———
@@ -333,6 +341,7 @@ def contrastive_train(model, mv_data, mvc_loss,
         # ——— 7) Design 1': pair-wise FN 风险路由（停用原 FN/HN MLP 路径）———
         prev_batch = None if y_prev_labels is None else y_prev_labels[sample_idx].to(device)
         route_mask = uncertain_mask if route_uncertain_only else None
+        u_thr = u_hat[idx_topk].min().item() if idx_topk.numel() > 0 else 0.0
         w_neg, eta_mat, rho_mat, route_stats, route_aux = _build_pairwise_fn_risk(
             common_z=common_z,
             memberships_cons=memberships[num_views],
@@ -382,7 +391,7 @@ def contrastive_train(model, mv_data, mvc_loss,
 
             # c) 不确定度回归
             u_loss = mvc_loss.uncertainty_regression_loss(u_hat, u)
-            Lu_i = (1 - gate_val) * lambda_u * u_loss
+            Lu_i = (1 - gate_u) * lambda_u * u_loss
             Lu += Lu_i.item()
             loss_list.append(Lu_i)
 
@@ -395,7 +404,7 @@ def contrastive_train(model, mv_data, mvc_loss,
             else:
                 push_loss = torch.tensor(0.0, device=device)
             pull_loss = (1.0 - pos_sim).mean()
-            Lpen_i = gate_val * (lambda_push * push_loss + lambda_pull * pull_loss)
+            Lpen_i = gate_hn * (lambda_push * push_loss + lambda_pull * pull_loss)
 
             Lpen += Lpen_i.item()
             loss_list.append(Lpen_i)
@@ -406,7 +415,7 @@ def contrastive_train(model, mv_data, mvc_loss,
                     model, zs, common_z, memberships,
                     batch_psedo_label, temperature=temperature_f
                 )
-                Lcross_i = gate_val * beta  * cross_l
+                Lcross_i = gate_fn * beta  * cross_l
                 Lcross += Lcross_i.item()
                 loss_list.append(Lcross_i)
 
@@ -436,8 +445,13 @@ def contrastive_train(model, mv_data, mvc_loss,
         top2_m = torch.topk(m_cons, 2, dim=1).values
         gamma = torch.log((top2_m[:, 0] + 1e-12) / (top2_m[:, 1] + 1e-12))
         sim_mat = route_aux['sim']
-        pos_sim = torch.diag(sim_mat)
+        pos_sim = F.cosine_similarity(zs[0], common_z, dim=1)
         neg_sim = sim_mat[route_aux['neg_mask']]
+        route_stats['U_ratio'] = float(k_unc) / max(batch_N, 1)
+        route_stats['u_thr'] = u_thr
+        route_stats['top_p_e'] = top_p_e
+        route_stats['k_unc'] = k_unc
+
         last_dump = {
             'u_sample': u_hat.detach().cpu(),
             'gamma_sample': gamma.detach().cpu(),
@@ -456,6 +470,10 @@ def contrastive_train(model, mv_data, mvc_loss,
             's_stab_pair_sample': route_aux['s_stab'][route_aux['neg_mask']].detach().cpu(),
             'sim_pos_sample': pos_sim.detach().cpu(),
             'sim_neg_sample': neg_sim.detach().cpu(),
+            'pairs_sampled': torch.tensor(float(neg_sim.numel())),
+            'neg_pairs_available': torch.tensor(float(route_aux['neg_mask'].float().sum().item())),
+            'safe_pairs_available': torch.tensor(float((route_aux['neg_mask'] & (~route_aux['rho'])).float().sum().item())),
+            'pos_pairs_count': torch.tensor(float(pos_sim.numel())),
             'uncertain_mask_sample': uncertain_mask.detach().cpu(),
             'neg_mask_sample': route_aux['neg_mask'].detach().cpu(),
             'top_p_e': torch.tensor(top_p_e),
@@ -467,10 +485,14 @@ def contrastive_train(model, mv_data, mvc_loss,
             'gate_val': torch.tensor(gate_val),
         }
 
+        route_stats['U_ratio'] = float(k_unc) / max(batch_N, 1)
+        route_stats['u_thr'] = u_thr
+        route_stats['top_p_e'] = top_p_e
+        route_stats['k_unc'] = k_unc
         print(f"[Epoch {epoch} Batch {batch_idx}] "
               f"Total={total_loss.item():.4f}  "
               f"FN_ratio={route_stats['fn_ratio']:.3f} HN_ratio={route_stats['hn_ratio']:.3f} "
-              f"stab={route_stats['stab_rate']:.3f} corr_u_fn={route_stats['corr_u_fn_ratio']:.3f}")
+              f"U_ratio={route_stats['U_ratio']:.3f} stab={route_stats['stab_rate']:.3f}")
 
     # ===== 训练循环结束 =====
     if batch_count > 0:
@@ -479,7 +501,7 @@ def contrastive_train(model, mv_data, mvc_loss,
         for k in route_meter:
             route_meter[k] /= batch_count
 
-    return {'loss': epoch_meter, 'route': route_meter, 'dump': last_dump, 'gate': gate_val if batch_count > 0 else 0.0}
+    return {'loss': epoch_meter, 'route': route_meter, 'dump': last_dump, 'gate': gate_val if batch_count > 0 else 0.0, 'gate_u': gate_u if batch_count > 0 else 0.0, 'gate_fn': gate_fn if batch_count > 0 else 0.0, 'gate_hn': gate_hn if batch_count > 0 else 0.0, 't': t if batch_count > 0 else 0.0, 'warmup_epochs': warmup_epochs, 'cross_warmup_epochs': cross_warmup_epochs}
 
 
 
@@ -503,7 +525,9 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                                    neg_mode='batch',
                                    knn_neg_k=20,
                                    route_uncertain_only=True,
-                                   y_prev_labels=None):
+                                   y_prev_labels=None,
+                                   p_min=0.05,
+                                   u_min=32):
     """
     大数据集版 Contrastive Training：
     - k: 用于构建每个视图下的 k-NN 图
@@ -519,7 +543,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
     last_dump = {}
 
     # 1) 课程学习式动态不确定比例
-    top_p = initial_top_p * max(0.0, 1.0 - (epoch - 1) / float(max_epoch - 1))
+    top_p = max(p_min, initial_top_p * max(0.0, 1.0 - (epoch - 1) / float(max_epoch - 1)))
 
     # 2) E 步：更新全量伪标签
     psedo_labeling(model, mv_data, batch_size)
@@ -547,7 +571,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         B = u_hat.size(0)
 
         # ——— 课程学习式不确定划分 ———
-        k_unc = max(1, int(B * top_p))
+        k_unc = max(min(u_min, B), int(B * top_p))
         _, topk_idx = torch.topk(u_hat, k_unc, largest=True)
         uncertain = torch.zeros(B, dtype=torch.bool, device=device)
         uncertain[topk_idx] = True
@@ -556,8 +580,12 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         # ——— 动态门控 Gate ———
         u_mean = u_hat.mean().item()
         mu_lo, mu_hi = 0.3, 0.7
-        gate = float((u_mean - mu_lo) / (mu_hi - mu_lo))
-        gate = max(0.0, min(1.0, gate))
+        gate_u = float((u_mean - mu_lo) / (mu_hi - mu_lo))
+        gate_u = max(0.0, min(1.0, gate_u))
+        t = float((epoch - 1) / max(1, max_epoch - 1))
+        gate_fn = t
+        gate_hn = t
+        gate = t
         gate_t = torch.tensor(gate, device=device)
 
         # ——— 共识中心 ———
@@ -566,6 +594,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         # ——— Design 1': pair-wise FN 风险路由（停用原 FN/HN MLP 路径）———
         prev_batch = None if y_prev_labels is None else y_prev_labels[sample_idx].to(device)
         route_mask = uncertain if route_uncertain_only else None
+        u_thr = u_hat[topk_idx].min().item() if topk_idx.numel() > 0 else 0.0
         w_neg, eta_mat, rho_mat, route_stats, route_aux = _build_pairwise_fn_risk(
             common_z=common_z,
             memberships_cons=memberships[num_views],
@@ -611,7 +640,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
 
             # c) 不确定度回归
             u_l = mvc_loss.uncertainty_regression_loss(u_hat, u)
-            Lu = (1 - gate) * lambda_u * u_l
+            Lu = (1 - gate_u) * lambda_u * u_l
             batch_loss += Lu
 
             # d) Hard-Negative penalty from safe negatives (Design 1')
@@ -623,7 +652,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             else:
                 push = torch.tensor(0.0, device=device)
             pull = (1.0 - pos_sim).mean()
-            Lpen = gate * (lambda_hn_penalty * push + lambda_hn_penalty * pull)
+            Lpen = gate_hn * (lambda_hn_penalty * push + lambda_hn_penalty * pull)
             batch_loss += Lpen
 
             # e) 跨视图加权 InfoNCE
@@ -632,7 +661,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                     model, zs, common_z, memberships,
                     batch_label, temperature=temperature_f
                 )
-                Lcross = gate * beta * prog * cross_l
+                Lcross = gate_fn * beta * prog * cross_l
                 batch_loss += Lcross
 
         # ——— 梯度更新 ———
@@ -655,8 +684,13 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         top2_m = torch.topk(m_cons, 2, dim=1).values
         gamma = torch.log((top2_m[:, 0] + 1e-12) / (top2_m[:, 1] + 1e-12))
         sim_mat = route_aux['sim']
-        pos_sim = torch.diag(sim_mat)
+        pos_sim = F.cosine_similarity(zs[0], common_z, dim=1)
         neg_sim = sim_mat[route_aux['neg_mask']]
+        route_stats['U_ratio'] = float(k_unc) / max(B, 1)
+        route_stats['u_thr'] = u_thr
+        route_stats['top_p_e'] = top_p
+        route_stats['k_unc'] = k_unc
+
         last_dump = {
             'u_sample': u_hat.detach().cpu(),
             'gamma_sample': gamma.detach().cpu(),
@@ -675,6 +709,10 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             's_stab_pair_sample': route_aux['s_stab'][route_aux['neg_mask']].detach().cpu(),
             'sim_pos_sample': pos_sim.detach().cpu(),
             'sim_neg_sample': neg_sim.detach().cpu(),
+            'pairs_sampled': torch.tensor(float(neg_sim.numel())),
+            'neg_pairs_available': torch.tensor(float(route_aux['neg_mask'].float().sum().item())),
+            'safe_pairs_available': torch.tensor(float((route_aux['neg_mask'] & (~route_aux['rho'])).float().sum().item())),
+            'pos_pairs_count': torch.tensor(float(pos_sim.numel())),
             'uncertain_mask_sample': uncertain.detach().cpu(),
             'neg_mask_sample': route_aux['neg_mask'].detach().cpu(),
             'top_p_e': torch.tensor(top_p),
@@ -692,4 +730,4 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         for k in route_meter:
             route_meter[k] /= batch_count
 
-    return {'loss': epoch_meter, 'route': route_meter, 'dump': last_dump, 'gate': gate if batch_count > 0 else 0.0}
+    return {'loss': epoch_meter, 'route': route_meter, 'dump': last_dump, 'gate': gate if batch_count > 0 else 0.0, 'gate_u': gate_u if batch_count > 0 else 0.0, 'gate_fn': gate_fn if batch_count > 0 else 0.0, 'gate_hn': gate_hn if batch_count > 0 else 0.0, 't': t if batch_count > 0 else 0.0, 'warmup_epochs': warmup_epochs, 'cross_warmup_epochs': cross_warmup_epochs}

@@ -33,10 +33,6 @@ parser.add_argument('--lambda_u', default=0.1, type=float)
 parser.add_argument('--lambda_hn_penalty',type=float,default=0.1)
 parser.add_argument('--cross_warmup_epochs', default=50, type=int,
                     help='Epoch to start cross-view weighted consistency loss (Stage-3).')
-parser.add_argument('--cross_ramp_epochs', default=10, type=int,
-                    help='Ramp epochs for cross-view loss after cross warmup.')
-parser.add_argument('--lambda_cross', default=1.0, type=float,
-                    help='Extra global weight for cross-view loss.')
 parser.add_argument('--membership_mode', default='softmax_distance', type=str,
                     choices=['gaussian', 'softmax_distance'],
                     help='Membership kernel mode: paper-improved softmax_distance or legacy gaussian.')
@@ -230,8 +226,6 @@ if __name__ == "__main__":
                 args.lambda_hn_penalty,
                 args.temperature_f,
                 cross_warmup_epochs=args.cross_warmup_epochs,
-                cross_ramp_epochs=args.cross_ramp_epochs,
-                lambda_cross=args.lambda_cross,
                 alpha_fn=args.alpha_fn,
                 pi_fn=args.pi_fn,
                 w_min=args.w_min,
@@ -271,7 +265,7 @@ if __name__ == "__main__":
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
-                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} assignment_stability={_rget(R, 'assignment_stability', 0.0):.4f} tau_fn_p50={_rget(R, 'tau_fn_p50', 0.0):.4f} tau_hn_p50={_rget(R, 'tau_hn_p50', 0.0):.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
+                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'safe_neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
             )
             logger.info(metric_line)
             logger.info(route_line)
@@ -373,8 +367,6 @@ if __name__ == "__main__":
                 lambda_hn_penalty=args.lambda_hn_penalty,
                 temperature_f=args.temperature_f,
                 cross_warmup_epochs=args.cross_warmup_epochs,
-                cross_ramp_epochs=args.cross_ramp_epochs,
-                lambda_cross=args.lambda_cross,
                 alpha_fn=args.alpha_fn,
                 pi_fn=args.pi_fn,
                 w_min=args.w_min,
@@ -411,7 +403,7 @@ if __name__ == "__main__":
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
-                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} assignment_stability={_rget(R, 'assignment_stability', 0.0):.4f} tau_fn_p50={_rget(R, 'tau_fn_p50', 0.0):.4f} tau_hn_p50={_rget(R, 'tau_hn_p50', 0.0):.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
+                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'safe_neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
             )
             logger.info(metric_line)
             logger.info(route_line)

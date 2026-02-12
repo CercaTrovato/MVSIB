@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.mixture import GaussianMixture
 
 class Loss(nn.Module):
     def __init__(self, batch_size, num_clusters, temperature_l, temperature_f,
@@ -39,11 +38,12 @@ class Loss(nn.Module):
         self.mse = nn.MSELoss()
         self.ce  = nn.CrossEntropyLoss()
 
-    def feature_loss(self, zi, z, w, y_pse):
+    def feature_loss(self, zi, z, w, y_pse, neg_weights=None):
         """
         zi: [N, D], z: [N, D]
         w:  [N, N] integer mask (0/1)
-        y_pse: [N, N] float pseudo‐label mask (e.g. 1.0 for positives, 0.1 for FN, 0.0 for true negatives)
+        y_pse: [N, N] float pseudo-label mask for positive pairs
+        neg_weights: [N, N] float weights for negative-pair denominator (Design 1').
         """
         N = z.size(0)
         device = zi.device
@@ -77,10 +77,14 @@ class Loss(nn.Module):
         neg_mask = (~w_mask) & (y_pse == 0)
         SMALL_NUM = torch.log(torch.tensor(1e-45, device=device))
 
-        neg_cross = (neg_mask.float() * cross_view_distance)
+        neg_weight_mat = torch.ones_like(y_pse, device=device)
+        if neg_weights is not None:
+            neg_weight_mat = neg_weights.to(device).float().clamp(min=0.0)
+
+        neg_cross = (neg_mask.float() * neg_weight_mat * cross_view_distance)
         neg_cross = neg_cross.masked_fill(neg_cross == 0, SMALL_NUM)
 
-        neg_inter = (neg_mask.float() * inter_view_distance)
+        neg_inter = (neg_mask.float() * neg_weight_mat * inter_view_distance)
         neg_inter = neg_inter.masked_fill(neg_inter == 0, SMALL_NUM)
 
         # 拼到一起，再除一次 temperature（可根据实际 remove）
@@ -260,7 +264,13 @@ class Loss(nn.Module):
     def weighted_info_nce(self, reps, S, temperature):
         sim = F.cosine_similarity(reps.unsqueeze(1), reps.unsqueeze(0), dim=2) / temperature  # (N, N)
 
-        # 使用 S 直接对所有样本对进行加权
+        # 按 Eq.(48) 对 S 做按行归一化（排除对角项）
+        S = S.clone()
+        eye = torch.eye(S.size(0), device=S.device, dtype=torch.bool)
+        S = S.masked_fill(eye, 0.0)
+        S = S / (S.sum(dim=1, keepdim=True) + 1e-8)
+
+        # 使用归一化后的 S 对所有样本对进行加权
         exp_sim = torch.exp(sim)  # (N, N)
         weighted_sim = exp_sim * S  # 每个样本对的加权相似度 (N, N)
 

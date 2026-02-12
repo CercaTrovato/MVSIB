@@ -79,6 +79,9 @@ def _qstats(x):
     x = np.asarray(x).reshape(-1)
     if x.size == 0:
         return (0.0, 0.0, 0.0, 0.0, 0.0)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
     return (float(np.quantile(x, 0.1)), float(np.quantile(x, 0.5)), float(np.quantile(x, 0.9)), float(np.mean(x)), float(np.std(x)))
 
 def _to_np(v):
@@ -88,6 +91,36 @@ def _to_np(v):
 
 def _rget(route, key, default=0.0):
     return route[key] if key in route else default
+
+
+def _route_with_dump_fallback(route, dump_dict):
+    # Keep ROUTE counters self-consistent when epoch aggregation keys are missing.
+    r = dict(route) if route is not None else {}
+    fn_ratio = float(_rget(r, 'fn_ratio', 0.0))
+    hn_ratio = float(_rget(r, 'hn_ratio', 0.0))
+    fn_count = float(_rget(r, 'FN_count', 0.0))
+    hn_count = float(_rget(r, 'HN_count', 0.0))
+    neg_count = float(_rget(r, 'neg_count', 0.0))
+    safe_neg_count = float(_rget(r, 'safe_neg_count', 0.0))
+    inconsistent = ((fn_ratio > 1e-12 and (fn_count <= 0.0 or neg_count <= 0.0)) or
+                    (hn_ratio > 1e-12 and (hn_count <= 0.0 or safe_neg_count <= 0.0)))
+    if inconsistent and dump_dict:
+        rho = _to_np(dump_dict.get('rho_fn_pair_sample', np.array([]))).reshape(-1)
+        eta = _to_np(dump_dict.get('eta_hn_pair_sample', np.array([]))).reshape(-1)
+        if rho.size > 0:
+            neg_count = float(rho.size)
+            fn_count = float(np.nansum(rho.astype(np.float32)))
+            safe_neg_count = max(neg_count - fn_count, 0.0)
+            hn_count = float(np.nansum(eta.astype(np.float32))) if eta.size == rho.size else float(hn_count)
+            r['neg_count'] = neg_count
+            r['FN_count'] = fn_count
+            r['safe_neg_count'] = safe_neg_count
+            r['HN_count'] = min(hn_count, safe_neg_count)
+            r['fn_pair_share'] = fn_count / max(neg_count, 1.0)
+            r['hn_pair_share'] = r['HN_count'] / max(safe_neg_count, 1.0)
+    r['route_count_inconsistent'] = int(((fn_ratio > 1e-12 and (float(_rget(r, 'FN_count', 0.0)) <= 0.0 or float(_rget(r, 'neg_count', 0.0)) <= 0.0)) or
+                                         (hn_ratio > 1e-12 and (float(_rget(r, 'HN_count', 0.0)) <= 0.0 or float(_rget(r, 'safe_neg_count', 0.0)) <= 0.0))))
+    return r
 
 def _save_debug_npz(debug_path, dump_dict, cluster_sizes, empty_cluster_count, min_cluster_size, gate_value, loss_dict):
     os.makedirs(os.path.dirname(debug_path), exist_ok=True)
@@ -213,7 +246,7 @@ if __name__ == "__main__":
 
             lr = optimizer.param_groups[0]['lr']
             L = train_out['loss']
-            R = train_out['route']
+            R = _route_with_dump_fallback(train_out['route'], train_out.get('dump', {}))
             metric_line = (
                 f"METRIC: epoch={epoch} step={epoch} ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f} "
                 f"gate={train_out['gate']:.4f} lr={lr:.6g} temp_f={args.temperature_f:.4f} temp_l={args.temperature_l:.4f} "
@@ -232,7 +265,7 @@ if __name__ == "__main__":
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
-                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f}"
+                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'safe_neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
             )
             logger.info(metric_line)
             logger.info(route_line)
@@ -351,7 +384,7 @@ if __name__ == "__main__":
 
             lr = optimizer.param_groups[0]['lr']
             L = train_out['loss']
-            R = train_out['route']
+            R = _route_with_dump_fallback(train_out['route'], train_out.get('dump', {}))
             metric_line = (
                 f"METRIC: epoch={epoch} step={epoch} ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f} "
                 f"gate={train_out['gate']:.4f} lr={lr:.6g} temp_f={args.temperature_f:.4f} temp_l={args.temperature_l:.4f} "
@@ -370,7 +403,7 @@ if __name__ == "__main__":
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
-                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f}"
+                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'safe_neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
             )
             logger.info(metric_line)
             logger.info(route_line)

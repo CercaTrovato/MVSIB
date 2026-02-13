@@ -43,7 +43,13 @@ class Network(nn.Module):
                  input_size, feature_dim,
                  tau=5, eps=1e-3,
                  fn_hn_k=5,       # kNN 邻居数,
-                 fn_hn_hidden=64):  # MLP2 隐藏维度
+                 fn_hn_hidden=64,  # MLP2 隐藏维度
+                 membership_mode='softmax_distance',
+                 membership_temperature=1.0,
+                 uncertainty_mode='log_odds',
+                 uncertainty_kappa=1.0,
+                 uncertainty_temperature=0.5,
+                 reliability_temperature=0.5):
 
         super(Network, self).__init__()
         self.encoders = []
@@ -59,6 +65,13 @@ class Network(nn.Module):
         self.device = device
         self.tau = tau
         self.eps = eps
+        # SCE 改进配置：支持 legacy 与 log-odds 两条可切换路径，便于做消融对照
+        self.membership_mode = membership_mode
+        self.membership_temperature = membership_temperature
+        self.uncertainty_mode = uncertainty_mode
+        self.uncertainty_kappa = uncertainty_kappa
+        self.uncertainty_temperature = uncertainty_temperature
+        self.reliability_temperature = reliability_temperature
         self.step = 0
         self.psedo_labels = torch.zeros(num_samples, dtype=torch.long)
         self.weights = nn.Parameter(torch.full((self.num_views,), 1 / self.num_views), requires_grad=True)
@@ -199,50 +212,67 @@ class Network(nn.Module):
     def compute_membership(self, z, v_index):
         """
         计算视图 v 或共识空间的隶属度 (N×L)。
+        - legacy: Gaussian-kernel membership（原始 Eq.(6)-(7) 风格）
+        - softmax_distance: softmax(-d/T_m)（改进版，降低 sigma 估计噪声敏感性）
         """
         centers = self.centers[v_index]  # (L, d)
-        sigmas  = self.sigmas[v_index]   # (L,)
 
-        # 欧氏距离平方 (N, L)
+        if self.membership_mode == 'softmax_distance':
+            dists_sq = torch.cdist(z, centers, p=2) ** 2
+            logits = -dists_sq / max(self.membership_temperature, self.eps)
+            membership = torch.softmax(logits, dim=1)
+            return membership
+
+        # legacy gaussian path
+        sigmas = self.sigmas[v_index]   # (L,)
         dists_sq = torch.cdist(z, centers, p=2) ** 2
-        denom = (2 * (sigmas**2).clamp(min=self.eps)).view(1, -1)  # (1, L)
-        unnorm = torch.exp(-dists_sq / denom)                      # (N, L)
+        denom = (2 * (sigmas ** 2).clamp(min=self.eps)).view(1, -1)
+        unnorm = torch.exp(-dists_sq / denom)
         membership = unnorm / (unnorm.sum(dim=1, keepdim=True) + 1e-12)
         return membership
 
     def estimate_uncertainty(self, memberships, common_z):
         """
-        模块2：基于 Top-2 差 & 熵 计算视图级 u_v，再跨视图取 max 得到 u，
-        并用 MLP(common_z) 预测 ĥu。
-        Args:
-            memberships (list[Tensor[N×L]]): 包含 V 个视图和 1 个共识空间
-            common_z    (Tensor[N×feat_dim])
-        Returns:
-            u     (Tensor[N]),      融合不确定度
-            u_hat (Tensor[N])       预测不确定度
+        SCE 不确定度：
+        - legacy: 熵 + Top-2 gap + max-view 融合（原路径）
+        - log_odds: 方案A，基于 log-odds margin + 可靠性加权跨视图融合（推荐）
         """
         V = self.num_views
-        # 视图级不确定度列表
+
+        if self.uncertainty_mode == 'legacy':
+            u_vs = []
+            for v in range(V):
+                m = memberships[v]  # (N, L)
+                top2 = torch.topk(m, 2, dim=1).values
+                delta = top2[:, 0] - top2[:, 1]
+                delta_norm = (delta - delta.min()) / (delta.max() - delta.min() + 1e-12)
+                ent = -torch.sum(m * torch.log(m + 1e-12), dim=1)
+                ent_norm = (ent - ent.min()) / (ent.max() - ent.min() + 1e-12)
+                u_v = 0.5 * ent_norm + 0.5 * (1.0 - delta_norm)
+                u_vs.append(u_v)
+
+            u_stack = torch.stack(u_vs, dim=1)
+            u = u_stack.max(dim=1).values
+            u_hat = self.mlp_uncert(common_z).squeeze(1)
+            return u, u_hat
+
+        # 方案A：log-odds margin -> sigmoid，跨视图用可靠性 softmax 融合
         u_vs = []
+        gamma_vs = []
         for v in range(V):
-            m = memberships[v]  # (N, L)
-            # Top-2 差值
-            top2 = torch.topk(m, 2, dim=1).values  # (N,2)
-            delta = top2[:, 0] - top2[:, 1]        # (N,)
-            delta_norm = (delta - delta.min()) / (delta.max() - delta.min() + 1e-12)
-            # 熵
-            ent = -torch.sum(m * torch.log(m + 1e-12), dim=1)  # (N,)
-            ent_norm = (ent - ent.min()) / (ent.max() - ent.min() + 1e-12)
-            # 组合
-            u_v = 0.5 * ent_norm + 0.5 * (1.0 - delta_norm)
+            m = memberships[v]
+            top2 = torch.topk(m, 2, dim=1).values
+            gamma_v = torch.log((top2[:, 0] + self.eps) / (top2[:, 1] + self.eps))
+            u_v = torch.sigmoid((self.uncertainty_kappa - gamma_v) / max(self.uncertainty_temperature, self.eps))
+            gamma_vs.append(gamma_v)
             u_vs.append(u_v)
 
-        # 融合：取最大值
-        u_stack = torch.stack(u_vs, dim=1)  # (N, V)
-        u = u_stack.max(dim=1).values       # (N,)
+        gamma_stack = torch.stack(gamma_vs, dim=1)  # (N, V)
+        u_stack = torch.stack(u_vs, dim=1)          # (N, V)
+        view_weights = torch.softmax(gamma_stack / max(self.reliability_temperature, self.eps), dim=1)
+        u = (view_weights * u_stack).sum(dim=1)
 
-        # 预测
-        u_hat = self.mlp_uncert(common_z).squeeze(1)  # (N,)
+        u_hat = self.mlp_uncert(common_z).squeeze(1)
         return u, u_hat
 
     def classify_fn_hn(self,
@@ -276,11 +306,11 @@ class Network(nn.Module):
 
         # 3) 取出对应的标签 & certain mask，全部在 GPU 上
         knn_labels = batch_psedo_label[knn_idx]  # (V, N, k)
-        certain_mask = certain_mask.unsqueeze(0).unsqueeze(2).expand(V, N, k)  # (V, N, k)
+        certain_mask_knn = certain_mask.unsqueeze(0).unsqueeze(2).expand(V, N, k)  # (V, N, k)
 
         # 4) 计算 Δd_i 的向量化版
-        same = (knn_labels == batch_psedo_label.view(1, N, 1)) & certain_mask
-        diff = (~same) & certain_mask
+        same = (knn_labels == batch_psedo_label.view(1, N, 1)) & certain_mask_knn
+        diff = (~same) & certain_mask_knn
         pos_cnt = same.sum(dim=2).float()  # (V, N)
         neg_cnt = diff.sum(dim=2).float()
         delta = (pos_cnt - neg_cnt) / (pos_cnt + neg_cnt + eps)  # (V, N)

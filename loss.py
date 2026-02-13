@@ -1,13 +1,16 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.mixture import GaussianMixture
 
 class Loss(nn.Module):
     def __init__(self, batch_size, num_clusters, temperature_l, temperature_f,
                  R_max=1.0, margin=0.5, bound_weight=0.1,
                  global_minority_ratio=0.5, num_gmm_components=2, num_pseudo_samples=5,
-                 mmd_weight=1.0, excl_weight=1.0, excl_sigma=2.0):
+                 mmd_weight=1.0, excl_weight=1.0, excl_sigma=2.0,
+                 ism_mode='improved', prior_weight=0.1, dirichlet_alpha_eps=0.1,
+                 swd_weight=1.0, div_weight=0.1, swd_num_projections=32,
+                 local_knn_k=5, cov_shrink=0.3, pseudo_noise_beta=0.5,
+                 manifold_radius_quantile=0.8, pseudo_jitter=1e-6):
         super(Loss, self).__init__()
         self.batch_size = batch_size
         self.num_clusters = num_clusters
@@ -31,6 +34,19 @@ class Loss(nn.Module):
         self.excl_weight = excl_weight
         self.excl_sigma = excl_sigma
 
+        # ISM 改进版超参：Dirichlet 比例稳定 + 局部流形伪样本 + SWD + DPP 多样性
+        self.ism_mode = ism_mode
+        self.prior_weight = prior_weight
+        self.dirichlet_alpha_eps = dirichlet_alpha_eps
+        self.swd_weight = swd_weight
+        self.div_weight = div_weight
+        self.swd_num_projections = swd_num_projections
+        self.local_knn_k = local_knn_k
+        self.cov_shrink = cov_shrink
+        self.pseudo_noise_beta = pseudo_noise_beta
+        self.manifold_radius_quantile = manifold_radius_quantile
+        self.pseudo_jitter = pseudo_jitter
+
         # 自适应权重相关：三项 [mmd, excl, bound] 的 EMA
         self.register_buffer('loss_ema', torch.ones(3))
         self.ema_momentum = 0.9
@@ -39,11 +55,12 @@ class Loss(nn.Module):
         self.mse = nn.MSELoss()
         self.ce  = nn.CrossEntropyLoss()
 
-    def feature_loss(self, zi, z, w, y_pse):
+    def feature_loss(self, zi, z, w, y_pse, neg_weights=None):
         """
         zi: [N, D], z: [N, D]
         w:  [N, N] integer mask (0/1)
-        y_pse: [N, N] float pseudo‐label mask (e.g. 1.0 for positives, 0.1 for FN, 0.0 for true negatives)
+        y_pse: [N, N] float pseudo-label mask for positive pairs
+        neg_weights: [N, N] float weights for negative-pair denominator (Design 1').
         """
         N = z.size(0)
         device = zi.device
@@ -77,10 +94,14 @@ class Loss(nn.Module):
         neg_mask = (~w_mask) & (y_pse == 0)
         SMALL_NUM = torch.log(torch.tensor(1e-45, device=device))
 
-        neg_cross = (neg_mask.float() * cross_view_distance)
+        neg_weight_mat = torch.ones_like(y_pse, device=device)
+        if neg_weights is not None:
+            neg_weight_mat = neg_weights.to(device).float().clamp(min=0.0)
+
+        neg_cross = (neg_mask.float() * neg_weight_mat * cross_view_distance)
         neg_cross = neg_cross.masked_fill(neg_cross == 0, SMALL_NUM)
 
-        neg_inter = (neg_mask.float() * inter_view_distance)
+        neg_inter = (neg_mask.float() * neg_weight_mat * inter_view_distance)
         neg_inter = neg_inter.masked_fill(neg_inter == 0, SMALL_NUM)
 
         # 拼到一起，再除一次 temperature（可根据实际 remove）
@@ -110,6 +131,68 @@ class Loss(nn.Module):
         mask = ~torch.eye(k, dtype=torch.bool, device=d.device)
         kr = torch.exp(-d[mask] ** 2 / (2 * self.excl_sigma ** 2))
         return kr.sum()
+
+    def compute_prior_loss(self, counts):
+        # Dirichlet barrier：抑制簇比例塌缩到 0（ISM 的比例稳定项）
+        pi_hat = counts / (counts.sum() + 1e-8)
+        alpha = 1.0 + self.dirichlet_alpha_eps
+        return -((alpha - 1.0) * torch.log(pi_hat + 1e-8)).mean()
+
+    def compute_swd_loss(self, real, pseudo):
+        # SWD：在随机 1D 投影上计算 W2，避免高维 MMD 带宽敏感问题
+        n = min(real.size(0), pseudo.size(0))
+        if n < 2:
+            return torch.tensor(0.0, device=real.device)
+        real_n = real[:n]
+        pseudo_n = pseudo[:n]
+        d = real.size(1)
+        proj = torch.randn(self.swd_num_projections, d, device=real.device)
+        proj = proj / (proj.norm(dim=1, keepdim=True) + 1e-12)
+        rp = real_n @ proj.t()
+        pp = pseudo_n @ proj.t()
+        rp, _ = torch.sort(rp, dim=0)
+        pp, _ = torch.sort(pp, dim=0)
+        return ((rp - pp) ** 2).mean()
+
+    def compute_dpp_diversity_loss(self, pseudo_feats):
+        # DPP 风格多样性：最小化 -logdet(K+δI)，鼓励伪样本覆盖簇内多样性
+        m = pseudo_feats.size(0)
+        if m < 2:
+            return torch.tensor(0.0, device=pseudo_feats.device)
+        dist2 = torch.cdist(pseudo_feats, pseudo_feats, p=2) ** 2
+        K = torch.exp(-dist2 / (2 * self.excl_sigma ** 2))
+        K = K + self.pseudo_jitter * torch.eye(m, device=pseudo_feats.device, dtype=pseudo_feats.dtype)
+        sign, logdet = torch.linalg.slogdet(K)
+        if sign <= 0:
+            return torch.tensor(0.0, device=pseudo_feats.device)
+        return -logdet
+
+    def _sample_local_manifold_pseudo(self, feats_k, fallback_center):
+        n_k, d = feats_k.shape
+        if n_k <= 1:
+            return fallback_center
+        with torch.no_grad():
+            dist = torch.cdist(feats_k, feats_k, p=2)
+            radius = torch.quantile(dist.flatten(), self.manifold_radius_quantile)
+        anchor_idx = torch.randint(0, n_k, (1,), device=feats_k.device).item()
+        z_i = feats_k[anchor_idx]
+        k_eff = min(max(2, self.local_knn_k), n_k)
+        nn_idx = torch.topk(dist[anchor_idx], k=k_eff, largest=False).indices
+        local = feats_k[nn_idx]
+        mu = local.mean(dim=0)
+        xc = local - mu.unsqueeze(0)
+        cov = xc.t() @ xc / max(local.size(0) - 1, 1)
+        cov = (1.0 - self.cov_shrink) * cov + self.cov_shrink * torch.diag(torch.diag(cov))
+        cov = self.pseudo_noise_beta * cov + self.pseudo_jitter * torch.eye(d, device=feats_k.device)
+        try:
+            eta = torch.distributions.MultivariateNormal(
+                torch.zeros(d, device=feats_k.device), covariance_matrix=cov
+            ).rsample()
+            cand = z_i + eta
+        except Exception:
+            cand = z_i
+        dmin = torch.cdist(cand.unsqueeze(0), feats_k, p=2).min()
+        return cand if dmin <= radius else z_i
 
     def compute_cluster_loss(self,
                              q_centers,  # [L, D]
@@ -161,42 +244,98 @@ class Loss(nn.Module):
         zero_classes = torch.arange(self.num_clusters, device=device)[~mask_unique]
         batch_mask = counts > 0
         global_mask = global_minority_mask.to(device=device)
+        if global_mask.all():
+            # 若未提供有效少数簇先验，则按当前 batch 规模分位数自适应判定
+            nonzero_counts = counts[batch_mask]
+            if nonzero_counts.numel() > 0:
+                thr = torch.quantile(nonzero_counts, self.global_minority_ratio)
+                global_mask = counts <= thr
         batch_minority_mask = batch_mask & global_mask
         minority_indices = batch_minority_mask.nonzero(as_tuple=False).view(-1)
 
-        # 伪样本生成（GMM）
+        if self.ism_mode == 'legacy':
+            # legacy: 保持原 GMM + MMD + exclusion 逻辑，便于消融对比
+            pseudos = torch.zeros((L, D), device=device, dtype=q_centers.dtype)
+            mu_minority = {}
+            for k_tensor in minority_indices:
+                k = k_tensor.item()
+                feats_k = features_batch[psedo_labels_batch == k]
+                n_k = feats_k.size(0)
+                if n_k <= 1:
+                    pseudos[k] = k_centers[k]
+                    mu_minority[k] = k_centers[k]
+                else:
+                    mu_k = feats_k.mean(dim=0)
+                    mu_minority[k] = mu_k
+                    xc = feats_k - mu_k.unsqueeze(0)
+                    cov_k = xc.T @ xc / (n_k - 1 + 1e-6)
+                    cov_p = (self.num_pseudo_samples / n_k) * cov_k + 1e-6 * torch.eye(D, device=device)
+                    try:
+                        mvn = torch.distributions.MultivariateNormal(mu_k, covariance_matrix=cov_p)
+                        pseudos[k] = mvn.rsample()
+                    except Exception:
+                        pseudos[k] = k_centers[k]
+
+            bound_loss = torch.tensor(0., device=device)
+            if self.bound_weight > 0 and minority_indices.numel() > 0:
+                for k in minority_indices.tolist():
+                    psi_k = pseudos[k]
+                    mu_k = mu_minority[k]
+                    d_self = torch.norm(psi_k - mu_k, p=2)
+                    dists = torch.norm(q_centers - psi_k.unsqueeze(0), dim=1)
+                    mask_self = torch.arange(L, device=device) == k
+                    d_other = dists.masked_fill(mask_self, float('inf')).min()
+                    bound_loss += F.relu(d_self - self.R_max) + F.relu(self.margin - d_other)
+            sim_pseudo_all = torch.zeros((L, L), device=device)
+            if minority_indices.numel() > 0:
+                q_exp = q_centers.unsqueeze(1).expand(L, L, D)
+                psi_exp = pseudos.unsqueeze(0).expand(L, L, D)
+                sim_pseudo_all = F.cosine_similarity(q_exp, psi_exp, dim=2) / self.temperature_l
+            eye_mask = torch.eye(L, device=device, dtype=torch.bool)
+            losses = []
+            for k in range(L):
+                if k in zero_classes:
+                    continue
+                pos_main = torch.exp(d_q[k, k])
+                if batch_minority_mask[k]:
+                    pos_main = pos_main + torch.exp(sim_pseudo_all[k, k])
+                dq_row = d_q[k]
+                mask_neg = (~eye_mask[k]).float()
+                neg_real = (torch.exp(dq_row) * mask_neg).sum()
+                neg_pseudo = 0
+                if minority_indices.numel() > 0:
+                    mask_minor = batch_minority_mask.float().to(device) * mask_neg
+                    neg_pseudo = (torch.exp(sim_pseudo_all[k]) * mask_minor).sum()
+                denom = pos_main + neg_real + neg_pseudo + 1e-8
+                losses.append(-torch.log(pos_main / denom))
+            cluster_loss = torch.stack(losses).sum() / (
+                    L - zero_classes.numel()) if L - zero_classes.numel() > 0 else torch.tensor(0., device=device)
+            if self.bound_weight > 0:
+                cluster_loss = cluster_loss + self.bound_weight * bound_loss
+            if features_batch is not None and minority_indices.numel() > 1:
+                mask_real = torch.zeros_like(psedo_labels_batch, dtype=torch.bool).to(device)
+                for k in minority_indices:
+                    mask_real |= (psedo_labels_batch == k.item())
+                real_feats = features_batch[mask_real]
+                pseudo_feats = pseudos[minority_indices]
+                total_mmd = self.compute_mmd_loss(real_feats, pseudo_feats)
+                total_excl = self.compute_exclusion_loss(pseudo_feats)
+                cluster_loss = cluster_loss + self.mmd_weight * total_mmd + self.excl_weight * total_excl
+            if return_mmd_excl:
+                return cluster_loss, total_mmd, total_excl
+            return cluster_loss
+
+        # improved: 局部流形伪样本 + SWD + DPP diversity + Dirichlet 比例稳定
         pseudos = torch.zeros((L, D), device=device, dtype=q_centers.dtype)
-        mu_minority = {}
+        pseudo_bank = []
         for k_tensor in minority_indices:
             k = k_tensor.item()
             feats_k = features_batch[psedo_labels_batch == k]
-            n_k = feats_k.size(0)
-            if n_k <= 1:
-                pseudos[k] = k_centers[k]
-                mu_minority[k] = k_centers[k]
-            else:
-                mu_k = feats_k.mean(dim=0)
-                mu_minority[k] = mu_k
-                xc = feats_k - mu_k.unsqueeze(0)
-                cov_k = xc.T @ xc / (n_k - 1 + 1e-6)
-                cov_p = (self.num_pseudo_samples / n_k) * cov_k + 1e-6 * torch.eye(D, device=device)
-                try:
-                    mvn = torch.distributions.MultivariateNormal(mu_k, covariance_matrix=cov_p)
-                    pseudos[k] = mvn.rsample()
-                except:
-                    pseudos[k] = k_centers[k]
-
-        # 边界约束
-        bound_loss = torch.tensor(0., device=device)
-        if self.bound_weight > 0 and minority_indices.numel() > 0:
-            for k in minority_indices.tolist():
-                psi_k = pseudos[k]
-                mu_k = mu_minority[k]
-                d_self = torch.norm(psi_k - mu_k, p=2)
-                dists = torch.norm(q_centers - psi_k.unsqueeze(0), dim=1)
-                mask_self = torch.arange(L, device=device) == k
-                d_other = dists.masked_fill(mask_self, float('inf')).min()
-                bound_loss += F.relu(d_self - self.R_max) + F.relu(self.margin - d_other)
+            pseudos[k] = self._sample_local_manifold_pseudo(feats_k, k_centers[k])
+            if feats_k.size(0) > 1:
+                swd_k = self.compute_swd_loss(feats_k, pseudos[k].unsqueeze(0).repeat(feats_k.size(0), 1))
+                total_mmd = total_mmd + swd_k
+            pseudo_bank.append(pseudos[k])
 
         # 簇级 InfoNCE + 伪样本
         if minority_indices.numel() > 0:
@@ -225,22 +364,13 @@ class Loss(nn.Module):
         cluster_loss = torch.stack(losses).sum() / (
                     L - zero_classes.numel()) if L - zero_classes.numel() > 0 else torch.tensor(0., device=device)
 
-        # 合并边界约束
-        if self.bound_weight > 0:
-            cluster_loss = cluster_loss + self.bound_weight * bound_loss
-        if features_batch is not None and minority_indices.numel() > 1:
-            # 批次中少数簇真实样本
-            device = psedo_labels_batch.device
-            mask_real = torch.zeros_like(psedo_labels_batch, dtype=torch.bool).to(device)
-            for k in minority_indices:
-                k = k.item()
-                mask_real |= (psedo_labels_batch == k)
-
-            real_feats = features_batch[mask_real]
-            pseudo_feats = pseudos[minority_indices]
-            total_mmd = self.compute_mmd_loss(real_feats, pseudo_feats)
-            total_excl = self.compute_exclusion_loss(pseudo_feats)
-            cluster_loss = cluster_loss + self.mmd_weight * total_mmd + self.excl_weight * total_excl
+        prior_loss = self.compute_prior_loss(counts)
+        if minority_indices.numel() > 0:
+            total_mmd = total_mmd / max(float(minority_indices.numel()), 1.0)
+        if len(pseudo_bank) > 1:
+            pseudo_feats = torch.stack(pseudo_bank, dim=0)
+            total_excl = self.compute_dpp_diversity_loss(pseudo_feats)
+        cluster_loss = cluster_loss + self.prior_weight * prior_loss + self.swd_weight * total_mmd + self.div_weight * total_excl
 
         if return_mmd_excl:
             return cluster_loss, total_mmd, total_excl
@@ -260,7 +390,13 @@ class Loss(nn.Module):
     def weighted_info_nce(self, reps, S, temperature):
         sim = F.cosine_similarity(reps.unsqueeze(1), reps.unsqueeze(0), dim=2) / temperature  # (N, N)
 
-        # 使用 S 直接对所有样本对进行加权
+        # 按 Eq.(48) 对 S 做按行归一化（排除对角项）
+        S = S.clone()
+        eye = torch.eye(S.size(0), device=S.device, dtype=torch.bool)
+        S = S.masked_fill(eye, 0.0)
+        S = S / (S.sum(dim=1, keepdim=True) + 1e-8)
+
+        # 使用归一化后的 S 对所有样本对进行加权
         exp_sim = torch.exp(sim)  # (N, N)
         weighted_sim = exp_sim * S  # 每个样本对的加权相似度 (N, N)
 

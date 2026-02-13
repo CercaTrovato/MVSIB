@@ -396,7 +396,8 @@ class Loss(nn.Module):
         S = S.clone()
         eye = torch.eye(S.size(0), device=S.device, dtype=torch.bool)
         S = S.masked_fill(eye, 0.0)
-        S = S / (S.sum(dim=1, keepdim=True) + 1e-8)
+        row_mass = torch.clamp(S.sum(dim=1, keepdim=True), min=1e-3)
+        S = S / row_mass
 
         # 使用归一化后的 S 对所有样本对进行加权
         exp_sim = torch.exp(sim)  # (N, N)
@@ -437,4 +438,5 @@ class Loss(nn.Module):
         for z in zs_list:
             loss += self.weighted_info_nce(z, S, temperature)
         loss += self.weighted_info_nce(common_z, S, temperature)
-        return loss
+        # 按 (V+1) 平均，避免跨视图项随视图数线性放大
+        return loss / max(float(len(zs_list) + 1), 1.0)

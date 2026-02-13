@@ -40,27 +40,15 @@ parser.add_argument('--lambda_cross', default=1.0, type=float,
 parser.add_argument('--membership_mode', default='softmax_distance', type=str,
                     choices=['gaussian', 'softmax_distance'],
                     help='Membership kernel mode: paper-improved softmax_distance or legacy gaussian.')
-parser.add_argument('--membership_temperature', default=1.0, type=float,
-                    help='Temperature T_m for softmax-distance membership.')
 parser.add_argument('--uncertainty_mode', default='log_odds', type=str,
                     choices=['legacy', 'log_odds'],
-                    help='Uncertainty mode: legacy entropy/top2 or improved log-odds margin.')
-parser.add_argument('--uncertainty_kappa', default=1.0, type=float,
-                    help='Margin threshold kappa in u=Sigmoid((kappa-gamma)/T_u).')
-parser.add_argument('--uncertainty_temperature', default=0.5, type=float,
-                    help='Temperature T_u for uncertainty sigmoid mapping.')
-parser.add_argument('--reliability_temperature', default=0.5, type=float,
-                    help='Temperature T_w for reliability-weighted view fusion.')
+                    help='Uncertainty mode: legacy entropy/top2 or improved parameter-free top2-gap.')
 parser.add_argument('--neg_mode', default='batch', type=str, choices=['batch', 'knn'],
                     help='Negative candidate mode for pair-wise FN risk routing.')
 parser.add_argument('--knn_neg_k', default=20, type=int,
                     help='k in kNN negatives when neg_mode=knn.')
 parser.add_argument('--alpha_fn', default=0.1, type=float,
                     help='Top-risk quantile ratio for FN-risk negatives.')
-parser.add_argument('--pi_fn', default=0.1, type=float,
-                    help='FN-risk negative downweight strength.')
-parser.add_argument('--w_min', default=0.05, type=float,
-                    help='Minimum negative weight for high FN-risk pairs.')
 parser.add_argument('--hn_beta', default=0.1, type=float,
                     help='Hard-negative quantile in safe negatives.')
 parser.add_argument('--route_uncertain_only', default=True, type=lambda x: x.lower()=='true',
@@ -216,11 +204,7 @@ if __name__ == "__main__":
         num_views, num_samples, num_clusters, device,
         input_sizes, args.feature_dim,
         membership_mode=args.membership_mode,
-        membership_temperature=args.membership_temperature,
         uncertainty_mode=args.uncertainty_mode,
-        uncertainty_kappa=args.uncertainty_kappa,
-        uncertainty_temperature=args.uncertainty_temperature,
-        reliability_temperature=args.reliability_temperature,
     ).to(device)
 
     optimizer = torch.optim.Adam(
@@ -283,8 +267,6 @@ if __name__ == "__main__":
                 cross_ramp_epochs=args.cross_ramp_epochs,
                 lambda_cross=args.lambda_cross,
                 alpha_fn=args.alpha_fn,
-                pi_fn=args.pi_fn,
-                w_min=args.w_min,
                 hn_beta=args.hn_beta,
                 neg_mode=args.neg_mode,
                 knn_neg_k=args.knn_neg_k,
@@ -317,8 +299,8 @@ if __name__ == "__main__":
             min_cluster = int(counts.min()) if counts.size > 0 else 0
             route_line = (
                 f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only={int(args.route_uncertain_only)} "
-                f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} alpha_fn={args.alpha_fn:.4f} pi_fn={args.pi_fn:.4f} "
-                f"w_min={args.w_min:.4f} hn_beta={args.hn_beta:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
+                f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} alpha_fn={args.alpha_fn:.4f} "
+                f"hn_beta={args.hn_beta:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
                 f"HN_ratio={_rget(R, 'hn_ratio', 0.0):.4f} FN_count={_rget(R, 'FN_count', 0.0):.0f} HN_count={_rget(R, 'HN_count', 0.0):.0f} neg_count={_rget(R, 'neg_count', 0.0):.0f} safe_neg_count={_rget(R, 'safe_neg_count', 0.0):.0f} "
                 f"mean_s_post_FN={_rget(R, 'mean_s_post_fn', 0.0):.4f} mean_s_post_nonFN={_rget(R, 'mean_s_post_non_fn', 0.0):.4f} "
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
@@ -429,8 +411,6 @@ if __name__ == "__main__":
                 cross_ramp_epochs=args.cross_ramp_epochs,
                 lambda_cross=args.lambda_cross,
                 alpha_fn=args.alpha_fn,
-                pi_fn=args.pi_fn,
-                w_min=args.w_min,
                 hn_beta=args.hn_beta,
                 neg_mode=args.neg_mode,
                 knn_neg_k=args.knn_neg_k,
@@ -460,8 +440,8 @@ if __name__ == "__main__":
             min_cluster = int(counts.min()) if counts.size > 0 else 0
             route_line = (
                 f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only={int(args.route_uncertain_only)} "
-                f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} alpha_fn={args.alpha_fn:.4f} pi_fn={args.pi_fn:.4f} "
-                f"w_min={args.w_min:.4f} hn_beta={args.hn_beta:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
+                f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} alpha_fn={args.alpha_fn:.4f} "
+                f"hn_beta={args.hn_beta:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
                 f"HN_ratio={_rget(R, 'hn_ratio', 0.0):.4f} FN_count={_rget(R, 'FN_count', 0.0):.0f} HN_count={_rget(R, 'HN_count', 0.0):.0f} neg_count={_rget(R, 'neg_count', 0.0):.0f} safe_neg_count={_rget(R, 'safe_neg_count', 0.0):.0f} "
                 f"mean_s_post_FN={_rget(R, 'mean_s_post_fn', 0.0):.4f} mean_s_post_nonFN={_rget(R, 'mean_s_post_non_fn', 0.0):.4f} "
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "

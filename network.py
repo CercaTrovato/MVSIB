@@ -179,8 +179,14 @@ class Network(nn.Module):
                     random_state=0,
                     verbose=False
                 )
-                # fit_predict 不会记录计算图
-                labels = km.fit_predict(z.to(dtype=torch.float64)).to(self.device).long()
+                # fit_predict 不会记录计算图；若输入异常则跳过本次中心更新以保证训练可继续。
+                z64 = z.to(dtype=torch.float64)
+                if not torch.isfinite(z64).all():
+                    continue
+                labels = km.fit_predict(z64)
+                if labels is None:
+                    continue
+                labels = labels.to(self.device).long()
                 centers = km.cluster_centers_.to(dtype=z.dtype).to(self.device)  # (L, d)
 
                 # 计算每个样本到其簇中心的距离

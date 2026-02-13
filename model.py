@@ -89,12 +89,22 @@ def pre_train(model, mv_data, batch_size, epochs, optimizer):
 def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, prev_labels_batch,
                             gate_val, alpha_fn=0.1,
                             hn_beta=0.1, neg_mode='batch', knn_k=20,
-                            uncertain_mask=None, eps=1e-12):
+                            uncertain_mask=None, eps=1e-6):
     """
     Design 1': pair-wise FN risk routing.
     - 对 negative pair (i,j) 估计 FN 风险并在 InfoNCE 分母软降权
     - 在可信 negatives 中按分位数选择 hard negatives（eta 矩阵）
     """
+    # Routing 是启发式重加权模块，不参与反传，避免分位数/排序/logit 链路引发梯度不稳定。
+    common_z = common_z.detach()
+    memberships_cons = memberships_cons.detach()
+    u_hat = u_hat.detach()
+    batch_labels = batch_labels.detach()
+    if prev_labels_batch is not None:
+        prev_labels_batch = prev_labels_batch.detach()
+    if uncertain_mask is not None:
+        uncertain_mask = uncertain_mask.detach()
+
     device = common_z.device
     N = common_z.size(0)
 
@@ -277,7 +287,7 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
         'tau_fn_per_anchor': tau_fn_per_anchor, 'tau_hn_per_anchor': tau_hn_per_anchor,
         'FN_count_per_anchor': fn_count_per_anchor, 'HN_count_per_anchor': hn_count_per_anchor,
     }
-    return w_neg, eta, rho, stats, aux
+    return w_neg.detach(), eta.detach(), rho.detach(), stats, aux
 
 
 
@@ -352,6 +362,18 @@ def contrastive_train(model, mv_data, mvc_loss,
         # ——— 2) 编码 + 融合 ———
         xrs, zs = model(sub_data_views)
         common_z = model.fusion(zs)
+
+        # 数值稳定防护：若表征已出现 NaN/Inf，跳过该 batch 防止污染后续聚类与优化
+        finite_ok = torch.isfinite(common_z).all()
+        if finite_ok:
+            for z_v in zs:
+                if not torch.isfinite(z_v).all():
+                    finite_ok = False
+                    break
+        if not finite_ok:
+            optimizer.zero_grad(set_to_none=True)
+            print(f"[Epoch {epoch} Batch {batch_idx}] non-finite embedding detected, skip batch")
+            continue
 
         # 现在有了 common_z，确定 device
         device = common_z.device
@@ -517,6 +539,10 @@ def contrastive_train(model, mv_data, mvc_loss,
 
         # ——— 9) 梯度更新 & 打印 ———
         total_loss = sum(loss_list)
+        if not torch.isfinite(total_loss):
+            optimizer.zero_grad(set_to_none=True)
+            print(f"[Epoch {epoch} Batch {batch_idx}] non-finite total_loss detected, skip backward")
+            continue
         optimizer.zero_grad()
         total_loss.backward()
         optimizer.step()
@@ -655,6 +681,17 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         _, zs = model(sub_views)
         zs = [z_i.to(device) for z_i in zs]
         common_z = model.fusion(zs).to(device)
+
+        finite_ok = torch.isfinite(common_z).all()
+        if finite_ok:
+            for z_v in zs:
+                if not torch.isfinite(z_v).all():
+                    finite_ok = False
+                    break
+        if not finite_ok:
+            optimizer.zero_grad(set_to_none=True)
+            print(f"[Epoch {epoch} Batch {batch_idx}] non-finite embedding detected, skip batch")
+            continue
 
         # ——— 更新中心、隶属度、不确定度 ———
         model.update_centers(zs, common_z)
@@ -798,6 +835,10 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                 batch_loss += Lcross
 
         # ——— 梯度更新 ———
+        if not torch.isfinite(batch_loss):
+            optimizer.zero_grad(set_to_none=True)
+            print(f"[Epoch {epoch} Batch {batch_idx}] non-finite total_loss detected, skip backward")
+            continue
         optimizer.zero_grad()
         batch_loss.backward()
         optimizer.step()

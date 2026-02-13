@@ -33,6 +33,10 @@ parser.add_argument('--lambda_u', default=0.1, type=float)
 parser.add_argument('--lambda_hn_penalty',type=float,default=0.1)
 parser.add_argument('--cross_warmup_epochs', default=50, type=int,
                     help='Epoch to start cross-view weighted consistency loss (Stage-3).')
+parser.add_argument('--cross_ramp_epochs', default=10, type=int,
+                    help='Ramp epochs for cross-view loss after cross warmup.')
+parser.add_argument('--lambda_cross', default=1.0, type=float,
+                    help='Extra global weight for cross-view loss.')
 parser.add_argument('--membership_mode', default='softmax_distance', type=str,
                     choices=['gaussian', 'softmax_distance'],
                     help='Membership kernel mode: paper-improved softmax_distance or legacy gaussian.')
@@ -67,6 +71,26 @@ parser.add_argument('--save_debug_npz', default=True, type=lambda x: x.lower()==
                     help='Save debug npz dump periodically.')
 parser.add_argument('--debug_dir', default='debug', type=str,
                     help='Directory to save debug npz files.')
+parser.add_argument('--ism_mode', default='improved', type=str, choices=['legacy', 'improved'],
+                    help='ISM implementation: legacy(GMM+MMD+exclusion) or improved(prior+local-manifold+SWD+DPP).')
+parser.add_argument('--ism_prior_weight', default=0.1, type=float,
+                    help='Weight of Dirichlet prior barrier in improved ISM.')
+parser.add_argument('--ism_dirichlet_alpha_eps', default=0.1, type=float,
+                    help='Epsilon in alpha=1+eps for Dirichlet barrier.')
+parser.add_argument('--ism_swd_weight', default=1.0, type=float,
+                    help='Weight of SWD distribution alignment in improved ISM.')
+parser.add_argument('--ism_div_weight', default=0.1, type=float,
+                    help='Weight of DPP-style diversity regularizer in improved ISM.')
+parser.add_argument('--ism_swd_proj', default=32, type=int,
+                    help='Number of random projections for SWD.')
+parser.add_argument('--ism_local_knn_k', default=5, type=int,
+                    help='kNN size for local tangent covariance in improved ISM.')
+parser.add_argument('--ism_cov_shrink', default=0.3, type=float,
+                    help='Covariance shrinkage ratio for local pseudo sampling.')
+parser.add_argument('--ism_pseudo_noise_beta', default=0.5, type=float,
+                    help='Noise scale beta for local pseudo sampling.')
+parser.add_argument('--ism_manifold_radius_q', default=0.8, type=float,
+                    help='Quantile radius for manifold-consistency filtering.')
 args = parser.parse_args()
 
 
@@ -191,8 +215,20 @@ if __name__ == "__main__":
         weight_decay=args.weight_decay
     )
 
-    mvc_loss = Loss(args.batch_size, num_clusters,
-                    args.temperature_l, args.temperature_f).to(device)
+    mvc_loss = Loss(
+        args.batch_size, num_clusters,
+        args.temperature_l, args.temperature_f,
+        ism_mode=args.ism_mode,
+        prior_weight=args.ism_prior_weight,
+        dirichlet_alpha_eps=args.ism_dirichlet_alpha_eps,
+        swd_weight=args.ism_swd_weight,
+        div_weight=args.ism_div_weight,
+        swd_num_projections=args.ism_swd_proj,
+        local_knn_k=args.ism_local_knn_k,
+        cov_shrink=args.ism_cov_shrink,
+        pseudo_noise_beta=args.ism_pseudo_noise_beta,
+        manifold_radius_quantile=args.ism_manifold_radius_q,
+    ).to(device)
 
     nowtime = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     logger = Logger(f"{args.dataset}=={nowtime}")
@@ -226,6 +262,8 @@ if __name__ == "__main__":
                 args.lambda_hn_penalty,
                 args.temperature_f,
                 cross_warmup_epochs=args.cross_warmup_epochs,
+                cross_ramp_epochs=args.cross_ramp_epochs,
+                lambda_cross=args.lambda_cross,
                 alpha_fn=args.alpha_fn,
                 pi_fn=args.pi_fn,
                 w_min=args.w_min,
@@ -265,7 +303,7 @@ if __name__ == "__main__":
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
-                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'safe_neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
+                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} assignment_stability={_rget(R, 'assignment_stability', 0.0):.4f} tau_fn_p50={_rget(R, 'tau_fn_p50', 0.0):.4f} tau_hn_p50={_rget(R, 'tau_hn_p50', 0.0):.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
             )
             logger.info(metric_line)
             logger.info(route_line)
@@ -367,6 +405,8 @@ if __name__ == "__main__":
                 lambda_hn_penalty=args.lambda_hn_penalty,
                 temperature_f=args.temperature_f,
                 cross_warmup_epochs=args.cross_warmup_epochs,
+                cross_ramp_epochs=args.cross_ramp_epochs,
+                lambda_cross=args.lambda_cross,
                 alpha_fn=args.alpha_fn,
                 pi_fn=args.pi_fn,
                 w_min=args.w_min,
@@ -403,7 +443,7 @@ if __name__ == "__main__":
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
-                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'safe_neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
+                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} assignment_stability={_rget(R, 'assignment_stability', 0.0):.4f} tau_fn_p50={_rget(R, 'tau_fn_p50', 0.0):.4f} tau_hn_p50={_rget(R, 'tau_hn_p50', 0.0):.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
             )
             logger.info(metric_line)
             logger.info(route_line)

@@ -65,6 +65,12 @@ parser.add_argument('--hn_beta', default=0.1, type=float,
                     help='Hard-negative quantile in safe negatives.')
 parser.add_argument('--route_uncertain_only', default=True, type=lambda x: x.lower()=='true',
                     help='Apply pair-wise routing only for uncertain anchors.')
+parser.add_argument('--fn_route_warmup_epochs', default=15, type=int,
+                    help='Warmup epochs before enabling FN-risk routing; use full contrastive negatives before this stage.')
+parser.add_argument('--feature_base_weight', default=1.0, type=float,
+                    help='Weight for baseline feature InfoNCE on all anchors.')
+parser.add_argument('--feature_route_weight', default=1.0, type=float,
+                    help='Weight for routed feature InfoNCE with FN-risk negative weights.')
 parser.add_argument('--log_dist_interval', default=5, type=int,
                     help='Epoch interval for DISTR summary and debug dump.')
 parser.add_argument('--save_debug_npz', default=True, type=lambda x: x.lower()=='true',
@@ -283,6 +289,9 @@ if __name__ == "__main__":
                 neg_mode=args.neg_mode,
                 knn_neg_k=args.knn_neg_k,
                 route_uncertain_only=args.route_uncertain_only,
+                fn_route_warmup_epochs=args.fn_route_warmup_epochs,
+                feature_base_weight=args.feature_base_weight,
+                feature_route_weight=args.feature_route_weight,
                 y_prev_labels=y_prev,
             )
 
@@ -426,6 +435,9 @@ if __name__ == "__main__":
                 neg_mode=args.neg_mode,
                 knn_neg_k=args.knn_neg_k,
                 route_uncertain_only=args.route_uncertain_only,
+                fn_route_warmup_epochs=args.fn_route_warmup_epochs,
+                feature_base_weight=args.feature_base_weight,
+                feature_route_weight=args.feature_route_weight,
                 y_prev_labels=y_prev,
             )
 

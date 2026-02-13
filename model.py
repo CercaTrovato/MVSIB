@@ -303,6 +303,9 @@ def contrastive_train(model, mv_data, mvc_loss,
                       neg_mode='batch',
                       knn_neg_k=20,
                       route_uncertain_only=True,
+                      fn_route_warmup_epochs=15,
+                      feature_base_weight=1.0,
+                      feature_route_weight=1.0,
                       y_prev_labels=None,
                       p_min=0.05,
                       u_min=32,
@@ -380,23 +383,53 @@ def contrastive_train(model, mv_data, mvc_loss,
 
         # ——— 7) Design 1': pair-wise FN 风险路由（停用原 FN/HN MLP 路径）———
         prev_batch = None if y_prev_labels is None else y_prev_labels[sample_idx].to(device)
-        route_mask = uncertain_mask if route_uncertain_only else None
+        route_active = (epoch > fn_route_warmup_epochs)
+        route_mask = uncertain_mask if (route_uncertain_only and route_active) else None
         u_thr = u_hat[idx_topk].min().item() if idx_topk.numel() > 0 else 0.0
-        w_neg, eta_mat, rho_mat, route_stats, route_aux = _build_pairwise_fn_risk(
-            common_z=common_z,
-            memberships_cons=memberships[num_views],
-            u_hat=u_hat,
-            batch_labels=batch_psedo_label,
-            prev_labels_batch=prev_batch,
-            gate_val=gate_val,
-            alpha_fn=alpha_fn,
-            pi_fn=pi_fn,
-            w_min=w_min,
-            hn_beta=hn_beta,
-            neg_mode=neg_mode,
-            knn_k=knn_neg_k,
-            uncertain_mask=route_mask,
-        )
+        if route_active:
+            # 仅在 warmup 后启用 FN 风险路由；warmup 阶段保持全量对比信号
+            w_neg, eta_mat, rho_mat, route_stats, route_aux = _build_pairwise_fn_risk(
+                common_z=common_z,
+                memberships_cons=memberships[num_views],
+                u_hat=u_hat,
+                batch_labels=batch_psedo_label,
+                prev_labels_batch=prev_batch,
+                gate_val=gate_val,
+                alpha_fn=alpha_fn,
+                pi_fn=pi_fn,
+                w_min=w_min,
+                hn_beta=hn_beta,
+                neg_mode=neg_mode,
+                knn_k=knn_neg_k,
+                uncertain_mask=route_mask,
+            )
+        else:
+            eye = torch.eye(batch_N, dtype=torch.bool, device=device)
+            neg_mask = (~eye) & (y_matrix.to(device) == 0)
+            w_neg = torch.ones(batch_N, batch_N, device=device)
+            eta_mat = torch.zeros(batch_N, batch_N, dtype=torch.bool, device=device)
+            rho_mat = torch.zeros(batch_N, batch_N, dtype=torch.bool, device=device)
+            route_stats = {
+                'fn_ratio':0.0,'safe_ratio':1.0,'hn_ratio':0.0,'FN_count':0.0,'HN_count':0.0,
+                'neg_count':neg_mask.float().sum().item(),'safe_neg_count':neg_mask.float().sum().item(),
+                'candidate_neg_size':neg_mask.float().sum().item(),'neg_after_filter_size':neg_mask.float().sum().item(),
+                'neg_used_in_loss_size':neg_mask.float().sum().item(),'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,
+                'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,
+                'label_flip':0.0,'stab_rate':0.0,'assignment_stability':0.0,'denom_fn_share':0.0,'denom_safe_share':1.0,
+                'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':neg_mask.float().sum(dim=1).mean().item(),
+                'neg_per_anchor':neg_mask.float().sum(dim=1).mean().item(),'U_size':int(uncertain_mask.sum().item()),
+                'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':1.0,
+                'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,
+                'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,
+            }
+            route_aux = {
+                'w_neg':w_neg,'neg_mask':neg_mask,'rho':rho_mat,'eta':eta_mat,
+                'tau_fn_per_anchor':torch.zeros(batch_N, device=device),
+                'tau_hn_per_anchor':torch.zeros(batch_N, device=device),
+                'S':torch.zeros(batch_N, batch_N, device=device),
+                'r':torch.zeros(batch_N, batch_N, device=device),
+                's_post':torch.zeros(batch_N, batch_N, device=device),
+            }
 
         # ——— 8) 累加各项损失 ———
         loss_list = []
@@ -423,8 +456,10 @@ def contrastive_train(model, mv_data, mvc_loss,
             Lcl += Lcl_i.item()
             loss_list.append(Lcl_i)
 
-            # b) Feature loss + 软屏蔽 FN
-            feat_loss = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=w_neg)
+            # b) Feature loss：全体 anchor 的基础 InfoNCE + uncertain 路由修正 InfoNCE
+            feat_base = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=None)
+            feat_route = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=w_neg)
+            feat_loss = feature_base_weight * feat_base + feature_route_weight * feat_route
             Lfeat_i = beta * feat_loss
             Lfeat += Lfeat_i.item()
             loss_list.append(Lfeat_i)
@@ -567,6 +602,9 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                                    neg_mode='batch',
                                    knn_neg_k=20,
                                    route_uncertain_only=True,
+                                   fn_route_warmup_epochs=15,
+                                   feature_base_weight=1.0,
+                                   feature_route_weight=1.0,
                                    y_prev_labels=None,
                                    p_min=0.05,
                                    u_min=32,
@@ -637,23 +675,53 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
 
         # ——— Design 1': pair-wise FN 风险路由（停用原 FN/HN MLP 路径）———
         prev_batch = None if y_prev_labels is None else y_prev_labels[sample_idx].to(device)
-        route_mask = uncertain if route_uncertain_only else None
+        route_active = (epoch > fn_route_warmup_epochs)
+        route_mask = uncertain if (route_uncertain_only and route_active) else None
         u_thr = u_hat[topk_idx].min().item() if topk_idx.numel() > 0 else 0.0
-        w_neg, eta_mat, rho_mat, route_stats, route_aux = _build_pairwise_fn_risk(
-            common_z=common_z,
-            memberships_cons=memberships[num_views],
-            u_hat=u_hat,
-            batch_labels=batch_label,
-            prev_labels_batch=prev_batch,
-            gate_val=gate,
-            alpha_fn=alpha_fn,
-            pi_fn=pi_fn,
-            w_min=w_min,
-            hn_beta=hn_beta,
-            neg_mode=neg_mode,
-            knn_k=knn_neg_k,
-            uncertain_mask=route_mask,
-        )
+        if route_active:
+            # 仅在 warmup 后启用 FN 风险路由；warmup 阶段保持全量对比信号
+            w_neg, eta_mat, rho_mat, route_stats, route_aux = _build_pairwise_fn_risk(
+                common_z=common_z,
+                memberships_cons=memberships[num_views],
+                u_hat=u_hat,
+                batch_labels=batch_label,
+                prev_labels_batch=prev_batch,
+                gate_val=gate,
+                alpha_fn=alpha_fn,
+                pi_fn=pi_fn,
+                w_min=w_min,
+                hn_beta=hn_beta,
+                neg_mode=neg_mode,
+                knn_k=knn_neg_k,
+                uncertain_mask=route_mask,
+            )
+        else:
+            eye = torch.eye(B, dtype=torch.bool, device=device)
+            neg_mask = (~eye) & (y_matrix.to(device) == 0)
+            w_neg = torch.ones(B, B, device=device)
+            eta_mat = torch.zeros(B, B, dtype=torch.bool, device=device)
+            rho_mat = torch.zeros(B, B, dtype=torch.bool, device=device)
+            route_stats = {
+                'fn_ratio':0.0,'safe_ratio':1.0,'hn_ratio':0.0,'FN_count':0.0,'HN_count':0.0,
+                'neg_count':neg_mask.float().sum().item(),'safe_neg_count':neg_mask.float().sum().item(),
+                'candidate_neg_size':neg_mask.float().sum().item(),'neg_after_filter_size':neg_mask.float().sum().item(),
+                'neg_used_in_loss_size':neg_mask.float().sum().item(),'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,
+                'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,
+                'label_flip':0.0,'stab_rate':0.0,'assignment_stability':0.0,'denom_fn_share':0.0,'denom_safe_share':1.0,
+                'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':neg_mask.float().sum(dim=1).mean().item(),
+                'neg_per_anchor':neg_mask.float().sum(dim=1).mean().item(),'U_size':int(uncertain.sum().item()),
+                'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':1.0,
+                'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,
+                'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,
+            }
+            route_aux = {
+                'w_neg':w_neg,'neg_mask':neg_mask,'rho':rho_mat,'eta':eta_mat,
+                'tau_fn_per_anchor':torch.zeros(B, device=device),
+                'tau_hn_per_anchor':torch.zeros(B, device=device),
+                'S':torch.zeros(B, B, device=device),
+                'r':torch.zeros(B, B, device=device),
+                's_post':torch.zeros(B, B, device=device),
+            }
 
         # ——— 构造并累加各视图的损失 ———
         batch_loss = 0.0
@@ -677,8 +745,10 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             Lcl = alpha * cl
             batch_loss += Lcl
 
-            # b) Feature loss（软屏蔽 FN）
-            feat_l = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=w_neg)
+            # b) Feature loss：全体 anchor 的基础 InfoNCE + uncertain 路由修正 InfoNCE
+            feat_base = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=None)
+            feat_route = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=w_neg)
+            feat_l = feature_base_weight * feat_base + feature_route_weight * feat_route
             Lfeat = beta * feat_l
             batch_loss += Lfeat
 

@@ -213,7 +213,7 @@ class Network(nn.Module):
         """
         计算视图 v 或共识空间的隶属度 (N×L)。
         - legacy: Gaussian-kernel membership（原始 Eq.(6)-(7) 风格）
-        - softmax_distance: softmax(-d/T_m)（改进版，降低 \sigma 估计噪声敏感性）
+        - softmax_distance: softmax(-d/T_m)（改进版，降低 sigma 估计噪声敏感性）
         """
         centers = self.centers[v_index]  # (L, d)
 

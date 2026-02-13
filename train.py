@@ -72,25 +72,33 @@ parser.add_argument('--save_debug_npz', default=True, type=lambda x: x.lower()==
 parser.add_argument('--debug_dir', default='debug', type=str,
                     help='Directory to save debug npz files.')
 parser.add_argument('--ism_mode', default='improved', type=str, choices=['legacy', 'improved'],
-                    help='ISM implementation: legacy(GMM+MMD+exclusion) or improved(prior+local-manifold+SWD+DPP).')
+                    help='ISM implementation: legacy(GMM+MMD+exclusion) or improved(prior+manifold+moment+coverage).')
 parser.add_argument('--ism_prior_weight', default=0.1, type=float,
                     help='Weight of Dirichlet prior barrier in improved ISM.')
 parser.add_argument('--ism_dirichlet_alpha_eps', default=0.1, type=float,
                     help='Epsilon in alpha=1+eps for Dirichlet barrier.')
-parser.add_argument('--ism_swd_weight', default=1.0, type=float,
-                    help='Weight of SWD distribution alignment in improved ISM.')
-parser.add_argument('--ism_div_weight', default=0.1, type=float,
-                    help='Weight of DPP-style diversity regularizer in improved ISM.')
-parser.add_argument('--ism_swd_proj', default=32, type=int,
-                    help='Number of random projections for SWD.')
+parser.add_argument('--ism_align_weight', default=0.5, type=float,
+                    help='Weight of moment alignment (mean + variance) in improved ISM.')
+parser.add_argument('--ism_cov_weight', default=0.1, type=float,
+                    help='Weight of coverage regularizer in improved ISM.')
+parser.add_argument('--ism_align_var_weight', default=0.1, type=float,
+                    help='Variance term weight inside moment alignment.')
+parser.add_argument('--ism_small_cluster_ratio', default=0.5, type=float,
+                    help='Quantile ratio to identify small clusters in improved ISM.')
+parser.add_argument('--ism_pseudo_conf_q', default=0.8, type=float,
+                    help='Confidence quantile for selecting pseudo anchors in improved ISM.')
 parser.add_argument('--ism_local_knn_k', default=5, type=int,
-                    help='kNN size for local tangent covariance in improved ISM.')
+                    help='Reserved local scale factor for lightweight manifold pseudo sampling.')
 parser.add_argument('--ism_cov_shrink', default=0.3, type=float,
-                    help='Covariance shrinkage ratio for local pseudo sampling.')
+                    help='Diagonal variance shrinkage ratio for pseudo sampling.')
 parser.add_argument('--ism_pseudo_noise_beta', default=0.5, type=float,
-                    help='Noise scale beta for local pseudo sampling.')
+                    help='Noise scale beta for pseudo sampling.')
 parser.add_argument('--ism_manifold_radius_q', default=0.8, type=float,
-                    help='Quantile radius for manifold-consistency filtering.')
+                    help='Radius quantile for manifold-consistency filtering.')
+parser.add_argument('--ism_cov_radius_min', default=0.5, type=float,
+                    help='Lower radius factor for coverage regularizer.')
+parser.add_argument('--ism_cov_radius_max', default=1.5, type=float,
+                    help='Upper radius factor for coverage regularizer.')
 args = parser.parse_args()
 
 
@@ -221,13 +229,17 @@ if __name__ == "__main__":
         ism_mode=args.ism_mode,
         prior_weight=args.ism_prior_weight,
         dirichlet_alpha_eps=args.ism_dirichlet_alpha_eps,
-        swd_weight=args.ism_swd_weight,
-        div_weight=args.ism_div_weight,
-        swd_num_projections=args.ism_swd_proj,
+        align_weight=args.ism_align_weight,
+        cov_weight=args.ism_cov_weight,
+        align_var_weight=args.ism_align_var_weight,
+        small_cluster_ratio=args.ism_small_cluster_ratio,
+        pseudo_conf_quantile=args.ism_pseudo_conf_q,
         local_knn_k=args.ism_local_knn_k,
         cov_shrink=args.ism_cov_shrink,
         pseudo_noise_beta=args.ism_pseudo_noise_beta,
         manifold_radius_quantile=args.ism_manifold_radius_q,
+        cov_radius_min=args.ism_cov_radius_min,
+        cov_radius_max=args.ism_cov_radius_max,
     ).to(device)
 
     nowtime = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')

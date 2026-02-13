@@ -87,7 +87,7 @@ def pre_train(model, mv_data, batch_size, epochs, optimizer):
 
 
 def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, prev_labels_batch,
-                            gate_val, alpha_fn=0.1, pi_fn=0.1, w_min=0.05,
+                            gate_val, alpha_fn=0.1,
                             hn_beta=0.1, neg_mode='batch', knn_k=20,
                             uncertain_mask=None, eps=1e-12):
     """
@@ -146,7 +146,7 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
     S = r * s_stab * _logit(s_post) + gate_val * r * _logit(s_nbr + eps)
     S = S.masked_fill(~neg_mask, float('-inf'))
 
-    # per-anchor quantile threshold for FN-risk pairs
+    # per-anchor quantile threshold for FN-risk pairs（用于统计与 HN safe 集）
     rho = torch.zeros(N, N, dtype=torch.bool, device=device)
     w_neg = torch.ones(N, N, device=device)
     fn_ratio_list = []
@@ -164,7 +164,6 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
         if uncertain_mask is not None and (not bool(uncertain_mask[i])):
             rho_i = torch.zeros_like(rho_i)
         rho[i, idx] = rho_i
-        w_neg[i, idx[rho_i]] = max(gate_val * pi_fn, w_min)
         fn_count_i = rho_i.float().sum()
         fn_count_per_anchor[i] = fn_count_i
         fn_ratio_i = rho_i.float().mean()
@@ -195,6 +194,18 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
     fn_center = fn_ratio_per_anchor - fn_ratio_per_anchor.mean()
     denom = (u_center.norm() * fn_center.norm() + eps)
     corr_u_fn = (u_center * fn_center).sum() / denom
+
+    # 将硬 FN 降权改为有界小扰动：w = 1 - lambda_r * risk_hat
+    # 概念对应：避免 w_min 近似删除负样本，保持 InfoNCE 分母几何压力。
+    lambda_r = 0.2
+    s_finite = S.masked_fill(~neg_mask, 0.0)
+    s_min = s_finite.min(dim=1, keepdim=True).values
+    s_max = s_finite.max(dim=1, keepdim=True).values
+    risk_hat = ((s_finite - s_min) / (s_max - s_min + eps)).clamp(0.0, 1.0)
+    risk_hat = risk_hat * neg_mask.float()
+    if uncertain_mask is not None:
+        risk_hat = risk_hat * uncertain_mask.float().unsqueeze(1)
+    w_neg = torch.clamp(1.0 - lambda_r * risk_hat, min=0.8, max=1.0)
 
     safe_mask = neg_mask & (~rho)
     non_hn_safe_mask = safe_mask & (~eta)
@@ -244,7 +255,7 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
         'assignment_stability': assign_stability if prev_labels_batch is not None else 0.0,
         'denom_fn_share': denom_fn_share,
         'denom_safe_share': 1.0 - denom_fn_share,
-        'w_hit_min_ratio': ((w_neg <= (w_min + eps)) & rho).float().mean().item() if rho.any() else 0.0,
+        'w_hit_min_ratio': (w_neg <= 0.80001).float().mean().item(),
         'corr_u_fn_ratio': corr_u_fn.item(),
         'N_size': (neg_mask.float().sum(dim=1).mean().item()),
         'neg_per_anchor': (neg_mask.float().sum(dim=1).mean().item()),
@@ -297,8 +308,6 @@ def contrastive_train(model, mv_data, mvc_loss,
                       initial_top_p=0.3,
                       cross_warmup_epochs=50,
                       alpha_fn=0.1,
-                      pi_fn=0.1,
-                      w_min=0.05,
                       hn_beta=0.1,
                       neg_mode='batch',
                       knn_neg_k=20,
@@ -308,7 +317,6 @@ def contrastive_train(model, mv_data, mvc_loss,
                       feature_route_weight=1.0,
                       y_prev_labels=None,
                       p_min=0.05,
-                      u_min=32,
                       lambda_cross=1.0,
                       cross_ramp_epochs=10):
     model.train()
@@ -359,7 +367,7 @@ def contrastive_train(model, mv_data, mvc_loss,
         batch_N  = u_hat.size(0)
 
         # ——— 4) 课程学习式不确定划分 ———
-        k_unc = max(min(u_min, batch_N), int(batch_N * top_p_e))
+        k_unc = max(1, int(batch_N * 0.2))
         _, idx_topk = torch.topk(u_hat, k_unc, largest=True)
         uncertain_mask = torch.zeros(batch_N, dtype=torch.bool, device=device)
         uncertain_mask[idx_topk] = True
@@ -368,11 +376,8 @@ def contrastive_train(model, mv_data, mvc_loss,
         print(f"Batch {batch_idx}: uncertain {uncertain_mask.sum().item()}/{batch_N} = {uncertain_mask.sum().item()/batch_N:.2%}")
 
         # ——— 5) 动态门控 Gate ———
-        u_mean = u_hat.mean().item()
-        mu_start, mu_end = 0.3, 0.7
-        raw_gate = (u_mean - mu_start) / (mu_end - mu_start)
-        gate_u = float(max(0.0, min(1.0, raw_gate)))
         t = float((epoch - 1) / max(1, max_epoch - 1))
+        gate_u = t
         gate_fn = t
         gate_hn = t
         gate_val = t
@@ -396,8 +401,6 @@ def contrastive_train(model, mv_data, mvc_loss,
                 prev_labels_batch=prev_batch,
                 gate_val=gate_val,
                 alpha_fn=alpha_fn,
-                pi_fn=pi_fn,
-                w_min=w_min,
                 hn_beta=hn_beta,
                 neg_mode=neg_mode,
                 knn_k=knn_neg_k,
@@ -450,12 +453,20 @@ def contrastive_train(model, mv_data, mvc_loss,
                 cl = mvc_loss.compute_cluster_loss(q_centers, k_centers, batch_psedo_label)
             else:
                 mask = torch.ones(mvc_loss.num_clusters, dtype=torch.bool, device=device)
-                cl, _, _ = mvc_loss.compute_cluster_loss(
-                    q_centers, k_centers, batch_psedo_label,
-                    features_batch=common_z,
-                    global_minority_mask=mask,
-                    return_mmd_excl=True
-                )
+                if mvc_loss.ism_mode == 'legacy':
+                    cl, _, _ = mvc_loss.compute_cluster_loss(
+                        q_centers, k_centers, batch_psedo_label,
+                        features_batch=common_z,
+                        global_minority_mask=mask,
+                        return_mmd_excl=True
+                    )
+                else:
+                    cl = mvc_loss.compute_cluster_loss(
+                        q_centers, k_centers, batch_psedo_label,
+                        features_batch=common_z,
+                        global_minority_mask=mask,
+                        return_mmd_excl=False
+                    )
             Lcl_i = alpha * cl
             Lcl += Lcl_i.item()
             loss_list.append(Lcl_i)
@@ -494,7 +505,6 @@ def contrastive_train(model, mv_data, mvc_loss,
                     model, zs, common_z, memberships,
                     batch_psedo_label, temperature=temperature_f
                 )
-                cross_l = cross_l / max(float(num_views), 1.0)
                 cross_ramp = min(1.0, max(0.0, (epoch - cross_warmup_epochs) / float(max(1, cross_ramp_epochs))))
                 Lcross_i = gate_fn * beta * lambda_cross * cross_ramp * cross_l
                 Lcross += Lcross_i.item()
@@ -600,8 +610,6 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                                    initial_top_p=0.3,
                                    cross_warmup_epochs=50,
                                    alpha_fn=0.1,
-                                   pi_fn=0.1,
-                                   w_min=0.05,
                                    hn_beta=0.1,
                                    neg_mode='batch',
                                    knn_neg_k=20,
@@ -611,7 +619,6 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                                    feature_route_weight=1.0,
                                    y_prev_labels=None,
                                    p_min=0.05,
-                                   u_min=32,
                                    lambda_cross=1.0,
                                    cross_ramp_epochs=10):
     """
@@ -657,18 +664,15 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         B = u_hat.size(0)
 
         # ——— 课程学习式不确定划分 ———
-        k_unc = max(min(u_min, B), int(B * top_p))
+        k_unc = max(1, int(B * 0.2))
         _, topk_idx = torch.topk(u_hat, k_unc, largest=True)
         uncertain = torch.zeros(B, dtype=torch.bool, device=device)
         uncertain[topk_idx] = True
         certain = ~uncertain
 
         # ——— 动态门控 Gate ———
-        u_mean = u_hat.mean().item()
-        mu_lo, mu_hi = 0.3, 0.7
-        gate_u = float((u_mean - mu_lo) / (mu_hi - mu_lo))
-        gate_u = max(0.0, min(1.0, gate_u))
         t = float((epoch - 1) / max(1, max_epoch - 1))
+        gate_u = t
         gate_fn = t
         gate_hn = t
         gate = t
@@ -692,8 +696,6 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                 prev_labels_batch=prev_batch,
                 gate_val=gate,
                 alpha_fn=alpha_fn,
-                pi_fn=pi_fn,
-                w_min=w_min,
                 hn_beta=hn_beta,
                 neg_mode=neg_mode,
                 knn_k=knn_neg_k,
@@ -744,12 +746,20 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                 cl = mvc_loss.compute_cluster_loss(q_centers, kv_centers, batch_label)
             else:
                 mask = torch.ones(mvc_loss.num_clusters, dtype=torch.bool, device=device)
-                cl, _, _ = mvc_loss.compute_cluster_loss(
-                    q_centers, kv_centers, batch_label,
-                    features_batch=common_z,
-                    global_minority_mask=mask,
-                    return_mmd_excl=True
-                )
+                if mvc_loss.ism_mode == 'legacy':
+                    cl, _, _ = mvc_loss.compute_cluster_loss(
+                        q_centers, kv_centers, batch_label,
+                        features_batch=common_z,
+                        global_minority_mask=mask,
+                        return_mmd_excl=True
+                    )
+                else:
+                    cl = mvc_loss.compute_cluster_loss(
+                        q_centers, kv_centers, batch_label,
+                        features_batch=common_z,
+                        global_minority_mask=mask,
+                        return_mmd_excl=False
+                    )
             Lcl = alpha * cl
             batch_loss += Lcl
 
@@ -783,7 +793,6 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                     model, zs, common_z, memberships,
                     batch_label, temperature=temperature_f
                 )
-                cross_l = cross_l / max(float(num_views), 1.0)
                 cross_ramp = min(1.0, max(0.0, (epoch - cross_warmup_epochs) / float(max(1, cross_ramp_epochs))))
                 Lcross = gate_fn * beta * lambda_cross * prog * cross_ramp * cross_l
                 batch_loss += Lcross

@@ -40,9 +40,9 @@ parser.add_argument('--lambda_cross', default=1.0, type=float,
 parser.add_argument('--membership_mode', default='softmax_distance', type=str,
                     choices=['gaussian', 'softmax_distance'],
                     help='Membership kernel mode: paper-improved softmax_distance or legacy gaussian.')
-parser.add_argument('--uncertainty_mode', default='log_odds', type=str,
-                    choices=['legacy', 'log_odds'],
-                    help='Uncertainty mode: legacy entropy/top2 or improved parameter-free top2-gap.')
+parser.add_argument('--uncertainty_mode', default='entropy', type=str,
+                    choices=['legacy', 'entropy'],
+                    help='Uncertainty mode: legacy entropy/top2 or improved normalized-entropy uncertainty.')
 parser.add_argument('--neg_mode', default='batch', type=str, choices=['batch', 'knn'],
                     help='Negative candidate mode for pair-wise FN risk routing.')
 parser.add_argument('--knn_neg_k', default=20, type=int,

@@ -45,7 +45,7 @@ class Network(nn.Module):
                  fn_hn_k=5,       # kNN 邻居数,
                  fn_hn_hidden=64,  # MLP2 隐藏维度
                  membership_mode='softmax_distance',
-                 uncertainty_mode='log_odds'):
+                 uncertainty_mode='entropy'):
 
         super(Network, self).__init__()
         self.encoders = []
@@ -235,7 +235,7 @@ class Network(nn.Module):
         """
         SCE 不确定度：
         - legacy: 熵 + Top-2 gap + max-view 融合（原路径）
-        - log_odds: 方案A，基于 log-odds margin + 可靠性加权跨视图融合（推荐）
+        - entropy: 方案A，基于归一化熵的无参不确定度（推荐）
         """
         V = self.num_views
 
@@ -256,13 +256,12 @@ class Network(nn.Module):
             u_hat = self.mlp_uncert(common_z).squeeze(1)
             return u, u_hat
 
-        # 方案A（无参）：top2-gap uncertainty，跨视图取 max（最保守）
+        # 方案A（无参）：归一化熵不确定度，跨视图取 max（最保守）
         u_vs = []
         for v in range(V):
             m = memberships[v]
-            top2 = torch.topk(m, 2, dim=1).values
-            gap_v = top2[:, 0] - top2[:, 1]
-            u_v = 1.0 - gap_v
+            entropy_v = -torch.sum(m * torch.log(m + self.eps), dim=1)
+            u_v = (entropy_v / torch.log(torch.tensor(float(self.num_clusters), device=m.device))).clamp(0.0, 1.0)
             u_vs.append(u_v)
 
         u_stack = torch.stack(u_vs, dim=1)
@@ -372,13 +371,12 @@ class Network(nn.Module):
 
         conf_c = memberships[V][torch.arange(N, device=device), batch_psedo_label].to(device)  # (N,)
 
-        # 2) 计算每个样本可靠性 r_i（由 uncertainty 导出，方向与置信度一致）
+        # 2) 计算每个样本可靠性 r_i（由归一化熵不确定度导出，方向与置信度一致）
         u_vs = []
         for v in range(V):
             m = memberships[v]  # (N, L)
-            top2 = torch.topk(m, 2, dim=1).values  # (N, 2)
-            delta = top2[:, 0] - top2[:, 1]  # (N,)
-            u_vs.append(1.0 - delta)
+            entropy_v = -torch.sum(m * torch.log(m + self.eps), dim=1)
+            u_vs.append((entropy_v / torch.log(torch.tensor(float(self.num_clusters), device=m.device))).clamp(0.0, 1.0))
 
         u_i = torch.stack(u_vs, dim=1).max(dim=1).values
         r = torch.clamp(1.0 - u_i, 0.2, 1.0)
@@ -388,6 +386,7 @@ class Network(nn.Module):
         s_view = (conf_v.unsqueeze(2) * conf_v.unsqueeze(1) * same.unsqueeze(0)).mean(dim=0)
         s_cons = conf_c.view(-1, 1) * conf_c.view(1, -1) * same
 
-        # 4) 最终一致性 S：视图与共识交集 + 可靠性对称加权
-        S = torch.minimum(s_view * rij, s_cons * rij)
+        # 4) 最终一致性 S：视图/共识对称融合 + 可靠性对称加权
+        S = 0.5 * (s_view + s_cons) * rij * same
+        S = S.masked_fill(torch.eye(N, device=device, dtype=torch.bool), 0.0)
         return S

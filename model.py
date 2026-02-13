@@ -429,6 +429,7 @@ def contrastive_train(model, mv_data, mvc_loss,
                 'S':torch.zeros(batch_N, batch_N, device=device),
                 'r':torch.zeros(batch_N, batch_N, device=device),
                 's_post':torch.zeros(batch_N, batch_N, device=device),
+                'sim':F.cosine_similarity(common_z.unsqueeze(1), common_z.unsqueeze(0), dim=2),
             }
 
         # ——— 8) 累加各项损失 ———
@@ -721,6 +722,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                 'S':torch.zeros(B, B, device=device),
                 'r':torch.zeros(B, B, device=device),
                 's_post':torch.zeros(B, B, device=device),
+                'sim':F.cosine_similarity(common_z.unsqueeze(1), common_z.unsqueeze(0), dim=2),
             }
 
         # ——— 构造并累加各视图的损失 ———

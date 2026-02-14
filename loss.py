@@ -98,20 +98,17 @@ class Loss(nn.Module):
 
         # —— 5) negative loss ——
         neg_mask = (~w_mask) & (y_pse == 0)
-        SMALL_NUM = torch.log(torch.tensor(1e-45, device=device))
+        NEG_INF = torch.tensor(float('-inf'), device=device)
 
         neg_weight_mat = torch.ones_like(y_pse, device=device)
         if neg_weights is not None:
             neg_weight_mat = neg_weights.to(device).float().clamp(min=0.0)
 
-        neg_cross = (neg_mask.float() * neg_weight_mat * cross_view_distance)
-        neg_cross = neg_cross.masked_fill(neg_cross == 0, SMALL_NUM)
+        neg_cross = (neg_weight_mat * cross_view_distance).masked_fill(~neg_mask, NEG_INF)
+        neg_inter = (neg_weight_mat * inter_view_distance).masked_fill(~neg_mask, NEG_INF)
 
-        neg_inter = (neg_mask.float() * neg_weight_mat * inter_view_distance)
-        neg_inter = neg_inter.masked_fill(neg_inter == 0, SMALL_NUM)
-
-        # 拼到一起，再除一次 temperature（可根据实际 remove）
-        neg_sim = torch.cat([neg_inter, neg_cross], dim=1) / self.temperature_f
+        # 拼到一起（cross/inter logits 已在上游按 temperature 缩放，这里不再重复除温度）
+        neg_sim = torch.cat([neg_inter, neg_cross], dim=1)
         neg_loss = torch.logsumexp(neg_sim, dim=1).sum()
 
         # —— 6) 最终归一 ——

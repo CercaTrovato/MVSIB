@@ -217,9 +217,15 @@ class Network(nn.Module):
 
         if self.membership_mode == 'softmax_distance':
             dists_sq = torch.cdist(z, centers, p=2) ** 2
-            # 样本自归一化尺度：对应“无参 membership 温度”设计，提升跨数据稳定性
-            scale = dists_sq.median(dim=1, keepdim=True).values.detach()
-            logits = -dists_sq / (scale + self.eps)
+            # gap-scaled 无参 membership：用最近两中心距离差自归一化，避免 median 尺度造成过平分配。
+            top2 = torch.topk(dists_sq, k=min(2, dists_sq.size(1)), largest=False, dim=1).values
+            d1 = top2[:, 0:1]
+            if top2.size(1) > 1:
+                d2 = top2[:, 1:2]
+            else:
+                d2 = d1 + 1.0
+            gap = (d2 - d1).clamp(min=self.eps).detach()
+            logits = -(dists_sq - d1) / gap
             membership = torch.softmax(logits, dim=1)
             return membership
 

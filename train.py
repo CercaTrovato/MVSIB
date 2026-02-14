@@ -297,6 +297,11 @@ if __name__ == "__main__":
             counts = np.bincount(network.psedo_labels.detach().cpu().numpy(), minlength=num_clusters)
             empty_cluster = int((counts == 0).sum())
             min_cluster = int(counts.min()) if counts.size > 0 else 0
+            D = train_out.get('dump', {})
+            sim_neg_vals = _to_np(D.get('sim_neg_sample', np.array([0.0]))).reshape(-1)
+            sim_neg_vals = sim_neg_vals[np.isfinite(sim_neg_vals)] if sim_neg_vals.size > 0 else np.array([0.0])
+            sim_neg_p99_route = float(np.quantile(sim_neg_vals, 0.99)) if sim_neg_vals.size > 0 else 0.0
+            corr_u_fn_route = _rget(R, 'corr_u_fn', _rget(R, 'corr_u_fn_ratio', 0.0))
             route_line = (
                 f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only={int(args.route_uncertain_only)} "
                 f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} alpha_fn={args.alpha_fn:.4f} "
@@ -306,7 +311,7 @@ if __name__ == "__main__":
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
-                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} assignment_stability={_rget(R, 'assignment_stability', 0.0):.4f} tau_fn_p50={_rget(R, 'tau_fn_p50', 0.0):.4f} tau_hn_p50={_rget(R, 'tau_hn_p50', 0.0):.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
+                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} assignment_stability={_rget(R, 'assignment_stability', 0.0):.4f} tau_fn_p50={_rget(R, 'tau_fn_p50', 0.0):.4f} tau_hn_p50={_rget(R, 'tau_hn_p50', 0.0):.4f} corr_u_fn={corr_u_fn_route:.4f} sim_neg_p99={sim_neg_p99_route:.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
             )
             logger.info(metric_line)
             logger.info(route_line)
@@ -438,6 +443,11 @@ if __name__ == "__main__":
             counts = np.bincount(network.psedo_labels.detach().cpu().numpy(), minlength=num_clusters)
             empty_cluster = int((counts == 0).sum())
             min_cluster = int(counts.min()) if counts.size > 0 else 0
+            D = train_out.get('dump', {})
+            sim_neg_vals = _to_np(D.get('sim_neg_sample', np.array([0.0]))).reshape(-1)
+            sim_neg_vals = sim_neg_vals[np.isfinite(sim_neg_vals)] if sim_neg_vals.size > 0 else np.array([0.0])
+            sim_neg_p99_route = float(np.quantile(sim_neg_vals, 0.99)) if sim_neg_vals.size > 0 else 0.0
+            corr_u_fn_route = _rget(R, 'corr_u_fn', _rget(R, 'corr_u_fn_ratio', 0.0))
             route_line = (
                 f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only={int(args.route_uncertain_only)} "
                 f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} alpha_fn={args.alpha_fn:.4f} "
@@ -447,7 +457,7 @@ if __name__ == "__main__":
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
-                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} assignment_stability={_rget(R, 'assignment_stability', 0.0):.4f} tau_fn_p50={_rget(R, 'tau_fn_p50', 0.0):.4f} tau_hn_p50={_rget(R, 'tau_hn_p50', 0.0):.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
+                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} assignment_stability={_rget(R, 'assignment_stability', 0.0):.4f} tau_fn_p50={_rget(R, 'tau_fn_p50', 0.0):.4f} tau_hn_p50={_rget(R, 'tau_hn_p50', 0.0):.4f} corr_u_fn={corr_u_fn_route:.4f} sim_neg_p99={sim_neg_p99_route:.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
             )
             logger.info(metric_line)
             logger.info(route_line)

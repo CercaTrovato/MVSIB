@@ -91,9 +91,10 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
                             hn_beta=0.1, neg_mode='batch', knn_k=20,
                             uncertain_mask=None, eps=1e-6):
     """
-    Design 1': pair-wise FN risk routing.
-    - 对 negative pair (i,j) 估计 FN 风险并在 InfoNCE 分母软降权
-    - 在可信 negatives 中按分位数选择 hard negatives（eta 矩阵）
+    Design 1': calibrated soft FN-risk routing.
+    - 对 negative pair (i,j) 计算有界 FN 风险概率 p_fn
+    - 用 soft weight w_neg=clip(1-lambda(t)*p_fn,w_min,1) 进行分母重加权
+    - 保留 rho/eta 输出用于日志兼容（当前 eta 固定为 0 先稳住训练）
     """
     # Routing 是启发式重加权模块，不参与反传，避免分位数/排序/logit 链路引发梯度不稳定。
     common_z = common_z.detach()
@@ -146,69 +147,57 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
         else:
             s_nbr = torch.zeros(N, N, device=device)
 
-        def _logit(x):
-            x = x.clamp(min=eps, max=1.0 - eps)
-            return torch.log(x / (1.0 - x))
+        # 统一有界风险分数：R = r * (s_post + gate*s_nbr + s_stab)/3，避免 logit/分位数链路导致断崖。
+        S = r * ((s_post + gate_val * s_nbr + s_stab) / 3.0).clamp(0.0, 1.0)
+        S = S * neg_mask.float()
 
-        S = r * s_stab * _logit(s_post) + gate_val * r * _logit(s_nbr + eps)
-        S = S.masked_fill(~neg_mask, float('-inf'))
+        R_vals = S[neg_mask]
+        if R_vals.numel() > 0:
+            mu_batch = R_vals.mean()
+            std_batch = R_vals.std(unbiased=False).clamp(min=eps)
+        else:
+            mu_batch = torch.tensor(0.0, device=device)
+            std_batch = torch.tensor(1.0, device=device)
 
-        rho = torch.zeros(N, N, dtype=torch.bool, device=device)
-        w_neg = torch.ones(N, N, device=device)
-        fn_ratio_list = []
-        fn_ratio_per_anchor = torch.zeros(N, device=device)
-        tau_fn_per_anchor = torch.full((N,), float('nan'), device=device)
-        fn_count_per_anchor = torch.zeros(N, device=device)
-        for i in range(N):
-            idx = neg_mask[i].nonzero(as_tuple=True)[0]
-            if idx.numel() == 0:
-                continue
-            s_i = S[i, idx]
-            tau_i = torch.quantile(s_i, max(0.0, min(1.0, 1.0 - alpha_fn)))
-            tau_fn_per_anchor[i] = tau_i
-            rho_i = s_i >= tau_i
-            if uncertain_mask is not None and (not bool(uncertain_mask[i])):
-                rho_i = torch.zeros_like(rho_i)
-            rho[i, idx] = rho_i
-            fn_count_i = rho_i.float().sum()
-            fn_count_per_anchor[i] = fn_count_i
-            fn_ratio_i = rho_i.float().mean()
-            fn_ratio_list.append(fn_ratio_i)
-            fn_ratio_per_anchor[i] = fn_ratio_i
+        gamma = 0.05
+        if not hasattr(_build_pairwise_fn_risk, '_ema_mu'):
+            _build_pairwise_fn_risk._ema_mu = mu_batch.detach()
+            _build_pairwise_fn_risk._ema_std = std_batch.detach()
+        else:
+            _build_pairwise_fn_risk._ema_mu = (
+                (1.0 - gamma) * _build_pairwise_fn_risk._ema_mu.to(device) + gamma * mu_batch.detach()
+            )
+            _build_pairwise_fn_risk._ema_std = (
+                (1.0 - gamma) * _build_pairwise_fn_risk._ema_std.to(device) + gamma * std_batch.detach()
+            )
+
+        mu = _build_pairwise_fn_risk._ema_mu.to(device)
+        std = _build_pairwise_fn_risk._ema_std.to(device).clamp(min=eps)
+        kappa = 1.0
+        z = (S - (mu + kappa * std)) / (std + eps)
+        p_fn = torch.sigmoid(z) * neg_mask.float()
+        if uncertain_mask is not None:
+            p_fn = p_fn * uncertain_mask.float().unsqueeze(1)
+
+        w_min = 0.7
+        lambda_r = 0.2 * float(gate_val)
+        w_neg = (1.0 - lambda_r * p_fn).clamp(min=w_min, max=1.0)
+
+        rho = (p_fn > 0.5) & neg_mask
+        eta = torch.zeros(N, N, dtype=torch.bool, device=device)
+
+        fn_count_per_anchor = rho.float().sum(dim=1)
+        hn_count_per_anchor = torch.zeros(N, device=device)
+        fn_ratio_per_anchor = fn_count_per_anchor / neg_mask.float().sum(dim=1).clamp(min=1.0)
 
         sim = F.cosine_similarity(common_z.unsqueeze(1), common_z.unsqueeze(0), dim=2)
-        eta = torch.zeros(N, N, dtype=torch.bool, device=device)
-        hn_ratio_list = []
-        tau_hn_per_anchor = torch.full((N,), float('nan'), device=device)
-        hn_count_per_anchor = torch.zeros(N, device=device)
-        for i in range(N):
-            safe_idx = (neg_mask[i] & (~rho[i])).nonzero(as_tuple=True)[0]
-            if safe_idx.numel() == 0:
-                continue
-            sim_i = sim[i, safe_idx]
-            tau_hn_i = torch.quantile(sim_i, max(0.0, min(1.0, 1.0 - hn_beta)))
-            tau_hn_per_anchor[i] = tau_hn_i
-            eta_i = sim_i >= tau_hn_i
-            if uncertain_mask is not None and (not bool(uncertain_mask[i])):
-                eta_i = torch.zeros_like(eta_i)
-            eta[i, safe_idx] = eta_i
-            hn_count_per_anchor[i] = eta_i.float().sum()
-            hn_ratio_list.append(eta_i.float().mean())
+        tau_fn_per_anchor = torch.zeros(N, device=device)
+        tau_hn_per_anchor = torch.zeros(N, device=device)
 
         u_center = u_hat - u_hat.mean()
         fn_center = fn_ratio_per_anchor - fn_ratio_per_anchor.mean()
         denom = (u_center.norm() * fn_center.norm() + eps)
         corr_u_fn = (u_center * fn_center).sum() / denom
-
-        lambda_r = 0.2
-        s_finite = S.masked_fill(~neg_mask, 0.0)
-        s_min = s_finite.min(dim=1, keepdim=True).values
-        s_max = s_finite.max(dim=1, keepdim=True).values
-        risk_hat = ((s_finite - s_min) / (s_max - s_min + eps)).clamp(0.0, 1.0)
-        risk_hat = risk_hat * neg_mask.float()
-        if uncertain_mask is not None:
-            risk_hat = risk_hat * uncertain_mask.float().unsqueeze(1)
-        w_neg = torch.clamp(1.0 - lambda_r * risk_hat, min=0.8, max=1.0)
 
         safe_mask = neg_mask & (~rho)
         non_hn_safe_mask = safe_mask & (~eta)
@@ -258,19 +247,19 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
             'assignment_stability': assign_stability if prev_labels_batch is not None else 0.0,
             'denom_fn_share': denom_fn_share,
             'denom_safe_share': 1.0 - denom_fn_share,
-            'w_hit_min_ratio': (w_neg <= 0.80001).float().mean().item(),
+            'w_hit_min_ratio': (w_neg <= 0.70001).float().mean().item(),
             'corr_u_fn_ratio': corr_u_fn.item(),
             'N_size': (neg_mask.float().sum(dim=1).mean().item()),
             'neg_per_anchor': (neg_mask.float().sum(dim=1).mean().item()),
             'U_size': int(uncertain_mask.sum().item()) if uncertain_mask is not None else int(N),
             'fn_pair_share': (fn_count / max(neg_count, 1.0)),
             'hn_pair_share': (hn_count / max(safe_neg_count, 1.0)),
-            'tau_fn_p10': torch.nanquantile(tau_fn_per_anchor, 0.1).item() if torch.isfinite(tau_fn_per_anchor).any() else 0.0,
-            'tau_fn_p50': torch.nanquantile(tau_fn_per_anchor, 0.5).item() if torch.isfinite(tau_fn_per_anchor).any() else 0.0,
-            'tau_fn_p90': torch.nanquantile(tau_fn_per_anchor, 0.9).item() if torch.isfinite(tau_fn_per_anchor).any() else 0.0,
-            'tau_hn_p10': torch.nanquantile(tau_hn_per_anchor, 0.1).item() if torch.isfinite(tau_hn_per_anchor).any() else 0.0,
-            'tau_hn_p50': torch.nanquantile(tau_hn_per_anchor, 0.5).item() if torch.isfinite(tau_hn_per_anchor).any() else 0.0,
-            'tau_hn_p90': torch.nanquantile(tau_hn_per_anchor, 0.9).item() if torch.isfinite(tau_hn_per_anchor).any() else 0.0,
+            'tau_fn_p10': torch.quantile(p_fn[neg_mask], 0.1).item() if neg_mask.any() else 0.0,
+            'tau_fn_p50': torch.quantile(p_fn[neg_mask], 0.5).item() if neg_mask.any() else 0.0,
+            'tau_fn_p90': torch.quantile(p_fn[neg_mask], 0.9).item() if neg_mask.any() else 0.0,
+            'tau_hn_p10': 0.0,
+            'tau_hn_p50': 0.0,
+            'tau_hn_p90': 0.0,
             'FN_count_anchor_p50': torch.quantile(fn_count_per_anchor, 0.5).item() if fn_count_per_anchor.numel() > 0 else 0.0,
             'HN_count_anchor_p50': torch.quantile(hn_count_per_anchor, 0.5).item() if hn_count_per_anchor.numel() > 0 else 0.0,
         }
@@ -279,6 +268,7 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
             'r': r, 's_stab': s_stab, 'neg_mask': neg_mask,
             'tau_fn_per_anchor': tau_fn_per_anchor, 'tau_hn_per_anchor': tau_hn_per_anchor,
             'FN_count_per_anchor': fn_count_per_anchor, 'HN_count_per_anchor': hn_count_per_anchor,
+            'p_fn': p_fn, 'ema_mu': mu, 'ema_std': std,
         }
 
     return w_neg.detach(), eta.detach(), rho.detach(), stats, aux
@@ -407,18 +397,20 @@ def contrastive_train(model, mv_data, mvc_loss,
 
         # ——— 7) Design 1': pair-wise FN 风险路由（停用原 FN/HN MLP 路径）———
         prev_batch = None if y_prev_labels is None else y_prev_labels[sample_idx].to(device)
-        route_active = (epoch > fn_route_warmup_epochs)
+        route_progress = max(0.0, float(epoch - fn_route_warmup_epochs) / 10.0)
+        route_gate = min(1.0, route_progress)
+        route_active = (route_gate > 0.0)
         route_mask = uncertain_mask if (route_uncertain_only and route_active) else None
         u_thr = u_det[idx_topk].min().item() if idx_topk.numel() > 0 else 0.0
         if route_active:
-            # 仅在 warmup 后启用 FN 风险路由；warmup 阶段保持全量对比信号
+            # warmup 后渐进启用 FN 风险路由，避免启用时分母结构断崖变化
             w_neg, eta_mat, rho_mat, route_stats, route_aux = _build_pairwise_fn_risk(
                 common_z=common_z,
                 memberships_cons=memberships[num_views],
                 u_hat=u_hat,
                 batch_labels=batch_psedo_label,
                 prev_labels_batch=prev_batch,
-                gate_val=gate_val,
+                gate_val=route_gate,
                 alpha_fn=alpha_fn,
                 hn_beta=hn_beta,
                 neg_mode=neg_mode,
@@ -720,18 +712,20 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
 
         # ——— Design 1': pair-wise FN 风险路由（停用原 FN/HN MLP 路径）———
         prev_batch = None if y_prev_labels is None else y_prev_labels[sample_idx].to(device)
-        route_active = (epoch > fn_route_warmup_epochs)
+        route_progress = max(0.0, float(epoch - fn_route_warmup_epochs) / 10.0)
+        route_gate = min(1.0, route_progress)
+        route_active = (route_gate > 0.0)
         route_mask = uncertain if (route_uncertain_only and route_active) else None
         u_thr = u_det[topk_idx].min().item() if topk_idx.numel() > 0 else 0.0
         if route_active:
-            # 仅在 warmup 后启用 FN 风险路由；warmup 阶段保持全量对比信号
+            # warmup 后渐进启用 FN 风险路由，避免启用时分母结构断崖变化
             w_neg, eta_mat, rho_mat, route_stats, route_aux = _build_pairwise_fn_risk(
                 common_z=common_z,
                 memberships_cons=memberships[num_views],
                 u_hat=u_hat,
                 batch_labels=batch_label,
                 prev_labels_batch=prev_batch,
-                gate_val=gate,
+                gate_val=route_gate,
                 alpha_fn=alpha_fn,
                 hn_beta=hn_beta,
                 neg_mode=neg_mode,

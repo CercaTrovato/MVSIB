@@ -196,6 +196,7 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
             'safe_neg_count': safe_neg_count,
             'candidate_neg_size': neg_count,
             'routed_candidate_neg_size': routed_candidate_neg_size,
+            'routed_stat_neg_size': routed_candidate_neg_size,
             'neg_after_filter_size': neg_count,
             'neg_used_in_loss_size': neg_count,
             'w_mean_on_FN': w_neg[rho].mean().item() if rho.any() else 0.0,
@@ -227,6 +228,9 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
             'tau_hn_p90': 0.0,
             'FN_count_anchor_p50': torch.quantile(fn_count_per_anchor, 0.5).item() if fn_count_per_anchor.numel() > 0 else 0.0,
             'HN_count_anchor_p50': 0.0,
+            'sigma_s': sigma_s,
+            'w_min': w_min,
+            'p_fn_thr': 0.5,
         }
         aux = {
             'S': S, 's_post': s_post, 'sim': sim, 'rho': rho, 'eta': eta, 'w_neg': w_neg,
@@ -298,7 +302,7 @@ def contrastive_train(model, mv_data, mvc_loss,
     criterion = torch.nn.MSELoss()  # 添加重建损失的损失函数
 
     epoch_meter = {'L_total':0.0,'L_recon':0.0,'L_feat':0.0,'L_cross':0.0,'L_cluster':0.0,'L_uncert':0.0,'L_hn':0.0,'L_reg':0.0}
-    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'assignment_stability':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'neg_per_anchor':0.0,'FN_count':0.0,'HN_count':0.0,'neg_count':0.0,'safe_neg_count':0.0,'candidate_neg_size':0.0,'routed_candidate_neg_size':0.0,'neg_after_filter_size':0.0,'neg_used_in_loss_size':0.0,'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':0.0,'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'U_ratio':0.0,'u_thr':0.0,'top_p_e':0.0,'k_unc':0.0}
+    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'assignment_stability':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'neg_per_anchor':0.0,'FN_count':0.0,'HN_count':0.0,'neg_count':0.0,'safe_neg_count':0.0,'candidate_neg_size':0.0,'routed_candidate_neg_size':0.0,'routed_stat_neg_size':0.0,'neg_after_filter_size':0.0,'neg_used_in_loss_size':0.0,'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':0.0,'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'sigma_s':0.05,'w_min':0.1,'p_fn_thr':0.5,'U_ratio':0.0,'u_thr':0.0,'top_p_e':0.0,'k_unc':0.0}
     batch_count = 0
     last_dump = {}
 
@@ -390,15 +394,15 @@ def contrastive_train(model, mv_data, mvc_loss,
             route_stats = {
                 'fn_ratio':0.0,'safe_ratio':1.0,'hn_ratio':0.0,'FN_count':0.0,'HN_count':0.0,
                 'neg_count':neg_mask.float().sum().item(),'safe_neg_count':neg_mask.float().sum().item(),
-                'candidate_neg_size':neg_mask.float().sum().item(),'routed_candidate_neg_size':0.0,'neg_after_filter_size':neg_mask.float().sum().item(),
+                'candidate_neg_size':neg_mask.float().sum().item(),'routed_candidate_neg_size':0.0,'routed_stat_neg_size':0.0,'neg_after_filter_size':neg_mask.float().sum().item(),
                 'neg_used_in_loss_size':neg_mask.float().sum().item(),'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,
                 'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,
                 'label_flip':0.0,'stab_rate':0.0,'assignment_stability':0.0,'denom_fn_share':0.0,'denom_safe_share':1.0,
-                'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':neg_mask.float().sum(dim=1).mean().item(),
+                'w_hit_min_ratio':0.0,'corr_u_fn':0.0,'corr_u_fn_ratio':0.0,'N_size':neg_mask.float().sum(dim=1).mean().item(),
                 'neg_per_anchor':neg_mask.float().sum(dim=1).mean().item(),'U_size':int(uncertain_mask.sum().item()),
                 'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':1.0,
                 'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,
-                'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,
+                'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'sigma_s':0.05,'w_min':0.1,'p_fn_thr':0.5,
             }
             route_aux = {
                 'w_neg':w_neg,'neg_mask':neg_mask,'rho':rho_mat,'eta':eta_mat,
@@ -446,10 +450,11 @@ def contrastive_train(model, mv_data, mvc_loss,
             Lcl += Lcl_i.item()
             loss_list.append(Lcl_i)
 
-            # b) Feature loss：全体 anchor 的基础 InfoNCE + uncertain 路由修正 InfoNCE
-            feat_base = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=None)
-            feat_route = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=w_neg)
-            feat_loss = feature_base_weight * feat_base + feature_route_weight * feat_route
+            # b) Feature loss：warmup 前仅基础 InfoNCE；routing 启用后切换到 routed InfoNCE。
+            if route_active:
+                feat_loss = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=w_neg)
+            else:
+                feat_loss = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=None)
             Lfeat_i = beta * feat_loss
             Lfeat += Lfeat_i.item()
             loss_list.append(Lfeat_i)
@@ -572,7 +577,7 @@ def contrastive_train(model, mv_data, mvc_loss,
         for k in route_meter:
             route_meter[k] /= batch_count
 
-    return {'loss': epoch_meter, 'route': route_meter, 'dump': last_dump, 'gate': gate_val if batch_count > 0 else 0.0, 'gate_u': gate_u if batch_count > 0 else 0.0, 'gate_fn': gate_fn if batch_count > 0 else 0.0, 'gate_hn': gate_hn if batch_count > 0 else 0.0, 't': t if batch_count > 0 else 0.0, 'warmup_epochs': warmup_epochs, 'cross_warmup_epochs': cross_warmup_epochs}
+    return {'loss': epoch_meter, 'route': route_meter, 'dump': last_dump, 'gate': gate_val if batch_count > 0 else 0.0, 'route_gate': route_gate if batch_count > 0 else 0.0, 'gate_u': gate_u if batch_count > 0 else 0.0, 'gate_fn': gate_fn if batch_count > 0 else 0.0, 'gate_hn': gate_hn if batch_count > 0 else 0.0, 't': t if batch_count > 0 else 0.0, 'warmup_epochs': warmup_epochs, 'cross_warmup_epochs': cross_warmup_epochs}
 
 
 
@@ -611,7 +616,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
     criterion = torch.nn.MSELoss()
     total_loss = 0.0
     epoch_meter = {'L_total':0.0,'L_recon':0.0,'L_feat':0.0,'L_cross':0.0,'L_cluster':0.0,'L_uncert':0.0,'L_hn':0.0,'L_reg':0.0}
-    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'assignment_stability':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'neg_per_anchor':0.0,'FN_count':0.0,'HN_count':0.0,'neg_count':0.0,'safe_neg_count':0.0,'candidate_neg_size':0.0,'routed_candidate_neg_size':0.0,'neg_after_filter_size':0.0,'neg_used_in_loss_size':0.0,'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':0.0,'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'U_ratio':0.0,'u_thr':0.0,'top_p_e':0.0,'k_unc':0.0}
+    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'assignment_stability':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'neg_per_anchor':0.0,'FN_count':0.0,'HN_count':0.0,'neg_count':0.0,'safe_neg_count':0.0,'candidate_neg_size':0.0,'routed_candidate_neg_size':0.0,'routed_stat_neg_size':0.0,'neg_after_filter_size':0.0,'neg_used_in_loss_size':0.0,'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':0.0,'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'sigma_s':0.05,'w_min':0.1,'p_fn_thr':0.5,'U_ratio':0.0,'u_thr':0.0,'top_p_e':0.0,'k_unc':0.0}
     batch_count = 0
     last_dump = {}
 
@@ -706,15 +711,15 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             route_stats = {
                 'fn_ratio':0.0,'safe_ratio':1.0,'hn_ratio':0.0,'FN_count':0.0,'HN_count':0.0,
                 'neg_count':neg_mask.float().sum().item(),'safe_neg_count':neg_mask.float().sum().item(),
-                'candidate_neg_size':neg_mask.float().sum().item(),'routed_candidate_neg_size':0.0,'neg_after_filter_size':neg_mask.float().sum().item(),
+                'candidate_neg_size':neg_mask.float().sum().item(),'routed_candidate_neg_size':0.0,'routed_stat_neg_size':0.0,'neg_after_filter_size':neg_mask.float().sum().item(),
                 'neg_used_in_loss_size':neg_mask.float().sum().item(),'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,
                 'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,
                 'label_flip':0.0,'stab_rate':0.0,'assignment_stability':0.0,'denom_fn_share':0.0,'denom_safe_share':1.0,
-                'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':neg_mask.float().sum(dim=1).mean().item(),
+                'w_hit_min_ratio':0.0,'corr_u_fn':0.0,'corr_u_fn_ratio':0.0,'N_size':neg_mask.float().sum(dim=1).mean().item(),
                 'neg_per_anchor':neg_mask.float().sum(dim=1).mean().item(),'U_size':int(uncertain.sum().item()),
                 'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':1.0,
                 'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,
-                'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,
+                'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'sigma_s':0.05,'w_min':0.1,'p_fn_thr':0.5,
             }
             route_aux = {
                 'w_neg':w_neg,'neg_mask':neg_mask,'rho':rho_mat,'eta':eta_mat,
@@ -759,10 +764,11 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             Lcl = alpha * cl
             batch_loss += Lcl
 
-            # b) Feature loss：全体 anchor 的基础 InfoNCE + uncertain 路由修正 InfoNCE
-            feat_base = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=None)
-            feat_route = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=w_neg)
-            feat_l = feature_base_weight * feat_base + feature_route_weight * feat_route
+            # b) Feature loss：warmup 前仅基础 InfoNCE；routing 启用后切换到 routed InfoNCE。
+            if route_active:
+                feat_l = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=w_neg)
+            else:
+                feat_l = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=None)
             Lfeat = beta * feat_l
             batch_loss += Lfeat
 
@@ -864,4 +870,4 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         for k in route_meter:
             route_meter[k] /= batch_count
 
-    return {'loss': epoch_meter, 'route': route_meter, 'dump': last_dump, 'gate': gate if batch_count > 0 else 0.0, 'gate_u': gate_u if batch_count > 0 else 0.0, 'gate_fn': gate_fn if batch_count > 0 else 0.0, 'gate_hn': gate_hn if batch_count > 0 else 0.0, 't': t if batch_count > 0 else 0.0, 'warmup_epochs': warmup_epochs, 'cross_warmup_epochs': cross_warmup_epochs}
+    return {'loss': epoch_meter, 'route': route_meter, 'dump': last_dump, 'gate': gate if batch_count > 0 else 0.0, 'route_gate': route_gate if batch_count > 0 else 0.0, 'gate_u': gate_u if batch_count > 0 else 0.0, 'gate_fn': gate_fn if batch_count > 0 else 0.0, 'gate_hn': gate_hn if batch_count > 0 else 0.0, 't': t if batch_count > 0 else 0.0, 'warmup_epochs': warmup_epochs, 'cross_warmup_epochs': cross_warmup_epochs}

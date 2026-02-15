@@ -199,9 +199,20 @@ def contrastive_train(model, mv_data, mvc_loss,
     criterion = torch.nn.MSELoss()
     epoch_meter = {'L_total': 0.0, 'L_recon': 0.0, 'L_feat': 0.0, 'L_cross': 0.0, 'L_cluster': 0.0,
                    'L_uncert': 0.0, 'L_hn': 0.0, 'L_reg': 0.0, 'L_fn_attr': 0.0, 'L_hn_margin': 0.0}
-    route_meter = {'fn_ratio': 0.0, 'safe_ratio': 0.0, 'hn_ratio': 0.0, 'FN_count': 0.0, 'HN_count': 0.0,
-                   'neg_count': 0.0, 'safe_neg_count': 0.0, 'U_size': 0.0, 'neg_used_in_loss_size': 0.0,
-                   'delta_p50': 0.0, 'kappa': 0.0}
+    route_meter = {
+        'fn_ratio': 0.0, 'hn_ratio': 0.0, 'safe_ratio': 0.0,
+        'FN_count': 0.0, 'HN_count': 0.0, 'neg_count': 0.0, 'safe_neg_count': 0.0,
+        'candidate_neg_size': 0.0, 'routed_stat_neg_size': 0.0, 'neg_after_filter_size': 0.0,
+        'neg_used_in_loss_size': 0.0, 'U_size': 0.0, 'N_size': 0.0, 'neg_per_anchor': 0.0,
+        'mean_s_post_fn': 0.0, 'mean_s_post_non_fn': 0.0, 'delta_post': 0.0,
+        'mean_sim_hn': 0.0, 'mean_sim_safe_non_hn': 0.0, 'delta_sim': 0.0,
+        'label_flip': 0.0, 'stab_rate': 0.0, 'assignment_stability': 0.0,
+        'denom_fn_share': 0.0, 'denom_safe_share': 0.0,
+        'w_hit_min_ratio': 0.0, 'w_mean_on_FN': 0.0, 'w_mean_on_safe': 0.0,
+        'tau_fn_p50': 0.0, 'tau_hn_p50': 0.0, 'corr_u_fn': 0.0,
+        'sigma_s': 0.05, 'w_min': 0.1, 'p_fn_thr': float(fn_prob_tau), 'route_count_inconsistent': 0.0,
+        'delta_p50': 0.0, 'kappa': 0.0,
+    }
     batch_count = 0
     last_dump = {}
 
@@ -257,10 +268,55 @@ def contrastive_train(model, mv_data, mvc_loss,
         batch_loss.backward()
         optimizer.step()
 
-        neg_cnt = route['neg_mask'].float().sum().item()
-        routed_cnt = route['route_mask'].float().sum().item()
-        fn_cnt = route['p_fn'].sum().item()
-        hn_cnt = route['p_hn'].sum().item()
+        neg_mask = route['neg_mask']
+        route_mask = route['route_mask']
+        sim = route['sim']
+        post = route['post_high']
+        p_fn = route['p_fn']
+        p_hn = route['p_hn']
+
+        neg_cnt = neg_mask.float().sum().item()
+        routed_cnt = route_mask.float().sum().item()
+        p_thr = float(fn_prob_tau)
+        fn_hard = route_mask & (p_fn > p_thr)
+        hn_hard = route_mask & (p_hn > p_thr)
+        fn_cnt = fn_hard.float().sum().item()
+        hn_cnt = hn_hard.float().sum().item()
+        safe_cnt = max(routed_cnt - fn_cnt - hn_cnt, 0.0)
+
+        def _safe_mean(x):
+            return float(x.mean().item()) if x.numel() > 0 else 0.0
+
+        mean_post_fn = _safe_mean(post[fn_hard])
+        mean_post_non_fn = _safe_mean(post[route_mask & (~fn_hard)])
+        mean_sim_hn = _safe_mean(sim[hn_hard])
+        mean_sim_safe_non_hn = _safe_mean(sim[route_mask & (~hn_hard) & (~fn_hard)])
+
+        temp = max(float(temperature_f), 1e-6)
+        masked_logit = ((sim / temp) + bias).masked_fill(~neg_mask, -1e9)
+        den = torch.logsumexp(masked_logit, dim=1)
+        w_ij = torch.exp(masked_logit - den.unsqueeze(1)) * neg_mask.float()
+        denom_fn_share = float((w_ij * fn_hard.float()).sum(dim=1).mean().item()) if neg_mask.any() else 0.0
+        safe_non_hn_mask = route_mask & (~fn_hard) & (~hn_hard)
+        denom_safe_share = float((w_ij * safe_non_hn_mask.float()).sum(dim=1).mean().item()) if neg_mask.any() else 0.0
+
+        fn_prob_anchor = p_fn.detach().sum(dim=1)
+        um = uncertain_mask.detach()
+        if um.any():
+            ua = u.detach()[um]
+            ra = fn_prob_anchor[um]
+            ua_c = ua - ua.mean()
+            ra_c = ra - ra.mean()
+            denom_corr = torch.sqrt((ua_c.pow(2).sum() * ra_c.pow(2).sum()).clamp(min=1e-12))
+            corr_u_fn = float((ua_c * ra_c).sum().item() / denom_corr.item())
+        else:
+            corr_u_fn = 0.0
+
+        tau_fn_p50 = float(torch.quantile(p_fn[route_mask], 0.5).item()) if route_mask.any() else 0.0
+        tau_hn_p50 = float(torch.quantile(p_hn[route_mask], 0.5).item()) if route_mask.any() else 0.0
+        w_mean_fn = _safe_mean(w_ij[fn_hard])
+        w_mean_safe = _safe_mean(w_ij[safe_non_hn_mask])
+        w_hit_min_ratio = float((w_ij[route_mask] <= route_meter['w_min']).float().mean().item()) if route_mask.any() else 0.0
         epoch_meter['L_total'] += batch_loss.item()
         epoch_meter['L_recon'] += float(L_recon)
         epoch_meter['L_feat'] += float(L_feat)
@@ -273,13 +329,32 @@ def contrastive_train(model, mv_data, mvc_loss,
 
         route_meter['fn_ratio'] += fn_cnt / max(routed_cnt, 1.0)
         route_meter['hn_ratio'] += hn_cnt / max(routed_cnt, 1.0)
-        route_meter['safe_ratio'] += max(routed_cnt - fn_cnt, 0.0) / max(routed_cnt, 1.0)
+        route_meter['safe_ratio'] += safe_cnt / max(routed_cnt, 1.0)
         route_meter['FN_count'] += fn_cnt
         route_meter['HN_count'] += hn_cnt
         route_meter['neg_count'] += neg_cnt
         route_meter['safe_neg_count'] += max(neg_cnt - fn_cnt, 0.0)
+        route_meter['candidate_neg_size'] += neg_cnt
+        route_meter['routed_stat_neg_size'] += routed_cnt
+        route_meter['neg_after_filter_size'] += neg_cnt
         route_meter['U_size'] += float(uncertain_mask.sum().item())
         route_meter['neg_used_in_loss_size'] += neg_cnt
+        route_meter['N_size'] += (neg_mask.float().sum(dim=1).mean().item() if neg_mask.numel() > 0 else 0.0)
+        route_meter['neg_per_anchor'] += (neg_mask.float().sum(dim=1).mean().item() if neg_mask.numel() > 0 else 0.0)
+        route_meter['mean_s_post_fn'] += mean_post_fn
+        route_meter['mean_s_post_non_fn'] += mean_post_non_fn
+        route_meter['delta_post'] += (mean_post_fn - mean_post_non_fn)
+        route_meter['mean_sim_hn'] += mean_sim_hn
+        route_meter['mean_sim_safe_non_hn'] += mean_sim_safe_non_hn
+        route_meter['delta_sim'] += (mean_sim_hn - mean_sim_safe_non_hn)
+        route_meter['denom_fn_share'] += denom_fn_share
+        route_meter['denom_safe_share'] += denom_safe_share
+        route_meter['w_hit_min_ratio'] += w_hit_min_ratio
+        route_meter['w_mean_on_FN'] += w_mean_fn
+        route_meter['w_mean_on_safe'] += w_mean_safe
+        route_meter['tau_fn_p50'] += tau_fn_p50
+        route_meter['tau_hn_p50'] += tau_hn_p50
+        route_meter['corr_u_fn'] += corr_u_fn
         route_meter['delta_p50'] += float(torch.quantile(delta.detach(), 0.5).item())
         route_meter['kappa'] += float(model.uncertain_kappa.item())
         batch_count += 1
@@ -297,8 +372,9 @@ def contrastive_train(model, mv_data, mvc_loss,
     if batch_count > 0:
         for k in epoch_meter:
             epoch_meter[k] /= batch_count
-        for k in route_meter:
-            route_meter[k] /= batch_count
+        for k, v in route_meter.items():
+            if isinstance(v, (float, int)):
+                route_meter[k] = v / max(batch_count, 1)
 
     return {
         'loss': epoch_meter,

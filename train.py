@@ -91,7 +91,7 @@ parser.add_argument('--tail_s_cap', default=0.90, type=float,
                     help='Similarity cap for hard-tail suppression.')
 parser.add_argument('--tail_beta', default=20.0, type=float,
                     help='Strength for hard-tail suppression.')
-parser.add_argument('--route_uncertain_only_train_applied', default=False, type=lambda x: x.lower()=='true',
+parser.add_argument('--route_uncertain_only_train_applied', default=True, type=lambda x: x.lower()=='true',
                     help='Whether uncertain-only gating is truly applied to training weights (otherwise stat-only).')
 parser.add_argument('--log_dist_interval', default=5, type=int,
                     help='Epoch interval for DISTR summary and debug dump.')

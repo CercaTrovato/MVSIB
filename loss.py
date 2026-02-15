@@ -309,4 +309,6 @@ class Loss(nn.Module):
         for z in zs_list:
             loss += self.weighted_info_nce(z, S, temperature)
         loss += self.weighted_info_nce(common_z, S, temperature)
+        # 取平均避免视图数变化导致 cross-loss 尺度线性放大。
+        loss = loss / (len(zs_list) + 1)
         return loss

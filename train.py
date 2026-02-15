@@ -108,6 +108,13 @@ parser.add_argument('--sce_vote_eps', default=0.05, type=float,
                     help='Uniform smoothing ratio for vote to prevent one-hot collapse in SCE*.')
 parser.add_argument('--debug_star_epochs', default=5, type=int,
                     help='Epochs to print SCE*/CSD* sanity checks for u/vote/g/w_neg.')
+parser.add_argument('--ucm_alpha_u', default=12.0, type=float)
+parser.add_argument('--ucm_beta_u', default=10.0, type=float)
+parser.add_argument('--ucm_m0', default=0.35, type=float)
+parser.add_argument('--ucm_a0', default=0.55, type=float)
+parser.add_argument('--theta_u_momentum', default=0.1, type=float)
+parser.add_argument('--theta_u_quantile', default=0.7, type=float)
+parser.add_argument('--lambda_pi', default=0.1, type=float)
 args = parser.parse_args()
 
 
@@ -279,6 +286,13 @@ if __name__ == "__main__":
                 vote_warmup_epochs=args.vote_warmup_epochs,
                 sce_vote_eps=args.sce_vote_eps,
                 debug_star_epochs=args.debug_star_epochs,
+                ucm_alpha_u=args.ucm_alpha_u,
+                ucm_beta_u=args.ucm_beta_u,
+                ucm_m0=args.ucm_m0,
+                ucm_a0=args.ucm_a0,
+                theta_u_momentum=args.theta_u_momentum,
+                theta_u_quantile=args.theta_u_quantile,
+                lambda_pi=args.lambda_pi,
             )
 
             epoch_list.append(epoch)
@@ -311,7 +325,8 @@ if __name__ == "__main__":
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
-                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f}"
+                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} "
+                f"pi_mean={_rget(R, 'pi_mean', 0.0):.4f} pi_p90={_rget(R, 'pi_p90', 0.0):.4f} w_hn_mean={_rget(R, 'w_hn_mean', 0.0):.4f} theta_u={_rget(R, 'theta_u', 0.0):.4f}"
             )
             logger.info(metric_line)
             logger.info(route_line)

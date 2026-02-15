@@ -151,8 +151,14 @@ class Network(nn.Module):
             'n_clusters': self.num_clusters,
             'verbose': False
         }
+        if not torch.isfinite(features).all():
+            print("[WARN] clustering skipped due to NaN/Inf features; fallback pseudo labels used")
+            return (torch.arange(features.size(0), device=features.device) % self.num_clusters).long()
         clustering_model = torch_clustering.PyTorchKMeans(init='k-means++', max_iter=300, tol=1e-4, **kwargs)
         psedo_labels = clustering_model.fit_predict(features.to(dtype=torch.float64))
+        if psedo_labels is None:
+            print("[WARN] clustering returned None; fallback pseudo labels used")
+            return (torch.arange(features.size(0), device=features.device) % self.num_clusters).long()
 
         return psedo_labels
 

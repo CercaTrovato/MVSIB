@@ -55,10 +55,20 @@ parser.add_argument('--route_uncertain_only', default=True, type=lambda x: x.low
                     help='Apply pair-wise routing only for uncertain anchors.')
 parser.add_argument('--fn_route_warmup_epochs', default=15, type=int,
                     help='Warmup epochs before enabling FN-risk routing; use full contrastive negatives before this stage.')
-parser.add_argument('--feature_base_weight', default=1.0, type=float,
-                    help='Weight for baseline feature InfoNCE on all anchors.')
-parser.add_argument('--feature_route_weight', default=1.0, type=float,
-                    help='Weight for routed feature InfoNCE with FN-risk negative weights.')
+parser.add_argument('--uncert_top_p_start', default=0.30, type=float,
+                    help='Start top-p ratio for uncertainty curriculum.')
+parser.add_argument('--uncert_top_p_end', default=0.05, type=float,
+                    help='End top-p ratio for uncertainty curriculum.')
+parser.add_argument('--uncert_decay_epochs', default=20, type=int,
+                    help='Epochs for linear uncertainty top-p decay.')
+parser.add_argument('--fn_prob_tau', default=1.0, type=float,
+                    help='Temperature for quantile-based FN probability mapping.')
+parser.add_argument('--tail_s_cap', default=0.90, type=float,
+                    help='Similarity cap for hard-tail suppression.')
+parser.add_argument('--tail_beta', default=20.0, type=float,
+                    help='Strength for hard-tail suppression.')
+parser.add_argument('--route_uncertain_only_train_applied', default=False, type=lambda x: x.lower()=='true',
+                    help='Whether uncertain-only gating is truly applied to training weights (otherwise stat-only).')
 parser.add_argument('--log_dist_interval', default=5, type=int,
                     help='Epoch interval for DISTR summary and debug dump.')
 parser.add_argument('--save_debug_npz', default=True, type=lambda x: x.lower()=='true',
@@ -272,8 +282,13 @@ if __name__ == "__main__":
                 knn_neg_k=args.knn_neg_k,
                 route_uncertain_only=args.route_uncertain_only,
                 fn_route_warmup_epochs=args.fn_route_warmup_epochs,
-                feature_base_weight=args.feature_base_weight,
-                feature_route_weight=args.feature_route_weight,
+                initial_top_p=args.uncert_top_p_start,
+                p_min=args.uncert_top_p_end,
+                uncert_decay_epochs=args.uncert_decay_epochs,
+                fn_prob_tau=args.fn_prob_tau,
+                tail_s_cap=args.tail_s_cap,
+                tail_beta=args.tail_beta,
+                route_uncertain_only_train_applied=args.route_uncertain_only_train_applied,
                 y_prev_labels=y_prev,
             )
 
@@ -421,8 +436,13 @@ if __name__ == "__main__":
                 knn_neg_k=args.knn_neg_k,
                 route_uncertain_only=args.route_uncertain_only,
                 fn_route_warmup_epochs=args.fn_route_warmup_epochs,
-                feature_base_weight=args.feature_base_weight,
-                feature_route_weight=args.feature_route_weight,
+                initial_top_p=args.uncert_top_p_start,
+                p_min=args.uncert_top_p_end,
+                uncert_decay_epochs=args.uncert_decay_epochs,
+                fn_prob_tau=args.fn_prob_tau,
+                tail_s_cap=args.tail_s_cap,
+                tail_beta=args.tail_beta,
+                route_uncertain_only_train_applied=args.route_uncertain_only_train_applied,
                 y_prev_labels=y_prev,
             )
 

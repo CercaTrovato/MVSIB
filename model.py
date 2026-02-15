@@ -268,6 +268,8 @@ def contrastive_train(model, mv_data, mvc_loss,
                       lambda_u,  lambda_hn_penalty,
                       temperature_f, max_epoch=100,
                       initial_top_p=0.3,
+                      p_min=0.05,
+                      uncert_decay_epochs=20,
                       cross_warmup_epochs=50,
                       alpha_fn=0.1,
                       hn_beta=0.1,
@@ -287,8 +289,9 @@ def contrastive_train(model, mv_data, mvc_loss,
     all_features = []  # 用于收集每个批次的特征
     all_labels = []  # 用于收集每个批次的标签
 
-    # 课程学习式动态不确定比例
-    top_p_e = max(p_min, initial_top_p * max(0.0, 1.0 - (epoch - 1) / float(max_epoch - 1)))
+    # 课程学习式动态不确定比例：top-p 从 start 线性衰减到 end，避免 U_size 恒定。
+    decay_ratio = min(1.0, max(0.0, (epoch - 1) / float(max(1, uncert_decay_epochs - 1))))
+    top_p_e = initial_top_p + (p_min - initial_top_p) * decay_ratio
 
     # E 步：更新全量伪标签
     psedo_labeling(model, mv_data, batch_size)
@@ -383,6 +386,10 @@ def contrastive_train(model, mv_data, mvc_loss,
                 neg_mode=neg_mode,
                 knn_k=knn_neg_k,
                 uncertain_mask=route_mask,
+                fn_prob_tau=fn_prob_tau,
+                tail_s_cap=tail_s_cap,
+                tail_beta=tail_beta,
+                route_uncertain_train_applied=route_uncertain_only_train_applied,
             )
         else:
             eye = torch.eye(batch_N, dtype=torch.bool, device=device)
@@ -592,6 +599,8 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                                    temperature_f=0.5,    # 默认温度系数
                                    max_epoch=100,
                                    initial_top_p=0.3,
+                                   p_min=0.05,
+                                   uncert_decay_epochs=20,
                                    cross_warmup_epochs=50,
                                    alpha_fn=0.1,
                                    hn_beta=0.1,
@@ -619,7 +628,8 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
     last_dump = {}
 
     # 1) 课程学习式动态不确定比例
-    top_p = max(p_min, initial_top_p * max(0.0, 1.0 - (epoch - 1) / float(max_epoch - 1)))
+    decay_ratio = min(1.0, max(0.0, (epoch - 1) / float(max(1, uncert_decay_epochs - 1))))
+    top_p = initial_top_p + (p_min - initial_top_p) * decay_ratio
 
     # 2) E 步：更新全量伪标签
     psedo_labeling(model, mv_data, batch_size)
@@ -699,6 +709,10 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                 neg_mode=neg_mode,
                 knn_k=knn_neg_k,
                 uncertain_mask=route_mask,
+                fn_prob_tau=fn_prob_tau,
+                tail_s_cap=tail_s_cap,
+                tail_beta=tail_beta,
+                route_uncertain_train_applied=route_uncertain_only_train_applied,
             )
         else:
             eye = torch.eye(B, dtype=torch.bool, device=device)

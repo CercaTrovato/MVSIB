@@ -67,6 +67,41 @@ parser.add_argument('--save_debug_npz', default=True, type=lambda x: x.lower()==
                     help='Save debug npz dump periodically.')
 parser.add_argument('--debug_dir', default='debug', type=str,
                     help='Directory to save debug npz files.')
+parser.add_argument('--enable_star_modules', default=True, type=lambda x: x.lower()=='true',
+                    help='Enable SCE*/CSD*/ISM* closed-loop modules while keeping legacy path ablatable.')
+parser.add_argument('--tau_p', default=0.2, type=float)
+parser.add_argument('--lambda_vote', default=0.5, type=float)
+parser.add_argument('--beta_d', default=0.2, type=float)
+parser.add_argument('--beta_c', default=0.3, type=float)
+parser.add_argument('--cal_kappa', default=10.0, type=float)
+parser.add_argument('--cal_delta', default=0.6, type=float)
+parser.add_argument('--share_target', default=0.08, type=float)
+parser.add_argument('--share_lambda_lr', default=0.05, type=float)
+parser.add_argument('--fn_s0', default=0.6, type=float)
+parser.add_argument('--fn_p0', default=0.5, type=float)
+parser.add_argument('--fn_ts', default=0.05, type=float)
+parser.add_argument('--fn_tp', default=0.1, type=float)
+parser.add_argument('--hn_sh', default=0.7, type=float)
+parser.add_argument('--hn_ph', default=0.6, type=float)
+parser.add_argument('--hn_eta', default=0.2, type=float)
+parser.add_argument('--hn_th', default=0.05, type=float)
+parser.add_argument('--hn_tb', default=0.05, type=float)
+parser.add_argument('--hn_margin', default=0.2, type=float)
+parser.add_argument('--gamma_gate', default=1.0, type=float)
+parser.add_argument('--fn_ratio_cut', default=0.5, type=float)
+parser.add_argument('--hn_ratio_cut', default=0.5, type=float)
+parser.add_argument('--u_threshold', default=0.5, type=float)
+parser.add_argument('--ism_rho_n', default=0.5, type=float)
+parser.add_argument('--ism_p_per_cluster', default=8, type=int)
+parser.add_argument('--ism_p_radius', default=0.9, type=float)
+parser.add_argument('--ism_sigma', default=0.01, type=float)
+parser.add_argument('--ism_t_proj', default=3, type=int)
+parser.add_argument('--ism_margin', default=0.05, type=float)
+parser.add_argument('--lambda_cal', default=0.1, type=float)
+parser.add_argument('--lambda_share', default=1.0, type=float)
+parser.add_argument('--lambda_ism', default=0.2, type=float)
+parser.add_argument('--lambda_rep', default=0.1, type=float)
+parser.add_argument('--lambda_excl', default=0.1, type=float)
 args = parser.parse_args()
 
 
@@ -201,6 +236,40 @@ if __name__ == "__main__":
                 knn_neg_k=args.knn_neg_k,
                 route_uncertain_only=args.route_uncertain_only,
                 y_prev_labels=y_prev,
+                enable_star_modules=args.enable_star_modules,
+                tau_p=args.tau_p,
+                lambda_vote=args.lambda_vote,
+                beta_d=args.beta_d,
+                beta_c=args.beta_c,
+                cal_kappa=args.cal_kappa,
+                cal_delta=args.cal_delta,
+                share_target=args.share_target,
+                share_lambda_lr=args.share_lambda_lr,
+                fn_s0=args.fn_s0,
+                fn_p0=args.fn_p0,
+                fn_ts=args.fn_ts,
+                fn_tp=args.fn_tp,
+                hn_sh=args.hn_sh,
+                hn_ph=args.hn_ph,
+                hn_eta=args.hn_eta,
+                hn_th=args.hn_th,
+                hn_tb=args.hn_tb,
+                hn_margin=args.hn_margin,
+                gamma_gate=args.gamma_gate,
+                fn_ratio_cut=args.fn_ratio_cut,
+                hn_ratio_cut=args.hn_ratio_cut,
+                u_threshold=args.u_threshold,
+                ism_rho_n=args.ism_rho_n,
+                ism_p_per_cluster=args.ism_p_per_cluster,
+                ism_p_radius=args.ism_p_radius,
+                ism_sigma=args.ism_sigma,
+                ism_t_proj=args.ism_t_proj,
+                ism_margin=args.ism_margin,
+                lambda_cal=args.lambda_cal,
+                lambda_share=args.lambda_share,
+                lambda_ism=args.lambda_ism,
+                lambda_rep=args.lambda_rep,
+                lambda_excl=args.lambda_excl,
             )
 
             epoch_list.append(epoch)
@@ -228,6 +297,7 @@ if __name__ == "__main__":
                 f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} alpha_fn={args.alpha_fn:.4f} pi_fn={args.pi_fn:.4f} "
                 f"w_min={args.w_min:.4f} hn_beta={args.hn_beta:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
                 f"HN_ratio={_rget(R, 'hn_ratio', 0.0):.4f} FN_count={_rget(R, 'FN_count', 0.0):.0f} HN_count={_rget(R, 'HN_count', 0.0):.0f} neg_count={_rget(R, 'neg_count', 0.0):.0f} safe_neg_count={_rget(R, 'safe_neg_count', 0.0):.0f} "
+                f"neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', 0.0):.0f} "
                 f"mean_s_post_FN={_rget(R, 'mean_s_post_fn', 0.0):.4f} mean_s_post_nonFN={_rget(R, 'mean_s_post_non_fn', 0.0):.4f} "
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "

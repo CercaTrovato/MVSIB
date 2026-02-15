@@ -104,14 +104,8 @@ class Loss(nn.Module):
         if neg_weights is not None:
             neg_weight_mat = neg_weights.to(device).float().clamp(min=0.0)
 
-        # 负对权重按 exp(logit) 乘法注入分母：等价于 log(w)+logit 再 logsumexp。
-        # 这样权重语义明确且与 InfoNCE 分母一致，避免直接缩放 logits 的数值偏置。
-        w_min = 1e-6
-        neg_weight_mat = neg_weight_mat.clamp(min=w_min)
-        neg_logw = torch.log(neg_weight_mat)
-
-        neg_cross = (cross_view_distance + neg_logw).masked_fill(~neg_mask, NEG_INF)
-        neg_inter = (inter_view_distance + neg_logw).masked_fill(~neg_mask, NEG_INF)
+        neg_cross = (neg_weight_mat * cross_view_distance).masked_fill(~neg_mask, NEG_INF)
+        neg_inter = (neg_weight_mat * inter_view_distance).masked_fill(~neg_mask, NEG_INF)
 
         # 拼到一起（cross/inter logits 已在上游按 temperature 缩放，这里不再重复除温度）
         neg_sim = torch.cat([neg_inter, neg_cross], dim=1)

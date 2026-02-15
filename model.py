@@ -89,15 +89,14 @@ def pre_train(model, mv_data, batch_size, epochs, optimizer):
 def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, prev_labels_batch,
                             gate_val, alpha_fn=0.1,
                             hn_beta=0.1, neg_mode='batch', knn_k=20,
-                            uncertain_mask=None, eps=1e-6,
-                            fn_prob_tau=1.0, tail_s_cap=0.9, tail_beta=20.0,
-                            route_uncertain_train_applied=False):
+                            uncertain_mask=None, eps=1e-6):
     """
-    Design 1': quantile-based FN risk routing + hard-tail suppression.
-    - 全体 negatives 保持在 InfoNCE 分母里，仅通过 w_neg 软重加权
-    - FN 风险使用 per-anchor 分位数阈值（alpha_fn）而不是固定均值方差平移阈
-    - 对 sim 高尾部加入额外抑制 w_tail，专门抑制 sim_neg_p99 污染
+    Design 1': calibrated soft FN-risk routing.
+    - 保持全体 negatives 参与 InfoNCE，仅对疑似 FN 负对做软降权
+    - 使用 sim-tail calibrated 概率：p_fn=σ((sim-τ_99)/σ_s) * g_unc
+    - uncertain 子集只用于调试统计，不再作为 loss 的硬筛选集合
     """
+    # Routing 是启发式重加权模块，不参与反传，避免数值链路干扰主干梯度。
     common_z = common_z.detach()
     memberships_cons = memberships_cons.detach()
     u_hat = u_hat.detach()
@@ -136,56 +135,26 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
             assign_stability = stab_vec.mean().item()
             s_stab = torch.ger(stab_vec, stab_vec)
 
-        if N > 1:
-            k_nb = min(knn_k + 1, N)
-            dist = torch.cdist(common_z, common_z, p=2)
-            nb_idx = torch.topk(-dist, k_nb, dim=1).indices[:, 1:]
-            nb_mask = torch.zeros(N, N, dtype=torch.bool, device=device)
-            rr = torch.arange(N, device=device).unsqueeze(1).expand_as(nb_idx)
-            nb_mask[rr, nb_idx] = True
-            inter = (nb_mask.unsqueeze(1) & nb_mask.unsqueeze(0)).sum(dim=2).float()
-            union = (nb_mask.unsqueeze(1) | nb_mask.unsqueeze(0)).sum(dim=2).float()
-            s_nbr = (inter / (union + eps)).clamp(0.0, 1.0)
-        else:
-            s_nbr = torch.zeros(N, N, device=device)
-
         r = (1.0 - 0.5 * (u_hat.unsqueeze(1) + u_hat.unsqueeze(0))).clamp(0.0, 1.0)
-        S = r * (0.5 * s_post + 0.3 * s_nbr + 0.2 * s_stab)
+        S = r * ((s_post + s_stab) / 2.0)
         S = S * neg_mask_full.float()
 
         sim = F.cosine_similarity(common_z.unsqueeze(1), common_z.unsqueeze(0), dim=2)
+        sim_neg = sim[neg_mask_full]
+        if sim_neg.numel() > 0:
+            tau = torch.quantile(sim_neg, 0.99).detach()
+        else:
+            tau = torch.tensor(1.0, device=device)
 
-        # per-anchor quantile FN 风险：高于该 anchor 的风险分位阈值才提升 p_fn
-        alpha_q = float(max(0.0, min(0.5, alpha_fn)))
-        p_fn = torch.zeros(N, N, device=device)
-        tau_fn_per_anchor = torch.zeros(N, device=device)
-        for i in range(N):
-            idx = neg_mask_full[i].nonzero(as_tuple=True)[0]
-            if idx.numel() == 0:
-                continue
-            s_i = S[i, idx]
-            tau_i = torch.quantile(s_i, max(0.0, min(1.0, 1.0 - alpha_q)))
-            tau_fn_per_anchor[i] = tau_i
-            r_i = torch.relu(s_i - tau_i)
-            p_i = torch.sigmoid(r_i / max(fn_prob_tau, eps))
-            if route_uncertain_train_applied and (not bool(uncertain_mask[i])):
-                p_i = torch.zeros_like(p_i)
-            p_fn[i, idx] = p_i
-
+        # sim-tail calibrated 风险：直接对齐 sim_neg_p99 的尾部污染。
+        sigma_s = 0.05
+        p_fn_sim = torch.sigmoid((sim - tau) / (sigma_s + eps))
         g_unc = (u_hat.unsqueeze(1) + u_hat.unsqueeze(0)).clamp(0.0, 1.0)
-        p_fn = p_fn * g_unc * neg_mask_full.float()
+        p_fn = (p_fn_sim * g_unc) * neg_mask_full.float()
 
         w_min = 0.1
         lambda_r = float(gate_val)
-        w_fn = (1.0 - lambda_r * p_fn).clamp(min=w_min, max=1.0)
-
-        # hard-tail 抑制：专门抑制 sim 极端高尾部，缓解 sim_neg_p99 长期抬升
-        tail_gap = torch.relu(sim - tail_s_cap)
-        w_tail = torch.exp(-tail_beta * tail_gap)
-        w_tail = torch.where(neg_mask_full, w_tail, torch.ones_like(w_tail))
-
-        w_neg = (w_fn * w_tail).clamp(min=w_min, max=1.0)
-        w_neg = torch.where(neg_mask_full, w_neg, torch.ones_like(w_neg))
+        w_neg = (1.0 - lambda_r * p_fn).clamp(min=w_min, max=1.0)
 
         rho = (p_fn > 0.5) & neg_mask_full
         eta = torch.zeros(N, N, dtype=torch.bool, device=device)
@@ -259,21 +228,16 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
             'tau_hn_p90': 0.0,
             'FN_count_anchor_p50': torch.quantile(fn_count_per_anchor, 0.5).item() if fn_count_per_anchor.numel() > 0 else 0.0,
             'HN_count_anchor_p50': 0.0,
-            'fn_alpha_q': alpha_q,
-            'fn_prob_tau': float(fn_prob_tau),
-            'tail_s_cap': float(tail_s_cap),
-            'tail_beta': float(tail_beta),
+            'sigma_s': sigma_s,
             'w_min': w_min,
             'p_fn_thr': 0.5,
-            'route_uncertain_only_train_applied': float(route_uncertain_train_applied),
-            'sigma_s': 0.0,
         }
         aux = {
             'S': S, 's_post': s_post, 'sim': sim, 'rho': rho, 'eta': eta, 'w_neg': w_neg,
             'r': r, 's_stab': s_stab, 'neg_mask': neg_mask_full, 'neg_mask_routed': neg_mask_routed,
-            'tau_fn_per_anchor': tau_fn_per_anchor, 'tau_hn_per_anchor': torch.zeros(N, device=device),
+            'tau_fn_per_anchor': fn_risk_anchor, 'tau_hn_per_anchor': torch.zeros(N, device=device),
             'FN_count_per_anchor': fn_count_per_anchor, 'HN_count_per_anchor': hn_count_per_anchor,
-            'p_fn': p_fn,
+            'p_fn': p_fn, 'tau_sim_p99': tau,
         }
 
     return w_neg.detach(), eta.detach(), rho.detach(), stats, aux
@@ -317,11 +281,7 @@ def contrastive_train(model, mv_data, mvc_loss,
                       feature_route_weight=1.0,
                       y_prev_labels=None,
                       lambda_cross=0.1,
-                      cross_ramp_epochs=10,
-                      fn_prob_tau=1.0,
-                      tail_s_cap=0.9,
-                      tail_beta=20.0,
-                      route_uncertain_only_train_applied=False):
+                      cross_ramp_epochs=10):
     model.train()
     mv_data_loader, num_views, num_samples, num_clusters = get_multiview_data(mv_data, batch_size)
 
@@ -344,7 +304,7 @@ def contrastive_train(model, mv_data, mvc_loss,
     criterion = torch.nn.MSELoss()  # 添加重建损失的损失函数
 
     epoch_meter = {'L_total':0.0,'L_recon':0.0,'L_feat':0.0,'L_cross':0.0,'L_cluster':0.0,'L_uncert':0.0,'L_hn':0.0,'L_reg':0.0}
-    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'assignment_stability':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'neg_per_anchor':0.0,'FN_count':0.0,'HN_count':0.0,'neg_count':0.0,'safe_neg_count':0.0,'candidate_neg_size':0.0,'routed_candidate_neg_size':0.0,'routed_stat_neg_size':0.0,'neg_after_filter_size':0.0,'neg_used_in_loss_size':0.0,'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':0.0,'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'sigma_s':0.0,'w_min':0.1,'p_fn_thr':0.5,'fn_alpha_q':0.1,'fn_prob_tau':1.0,'tail_s_cap':0.9,'tail_beta':20.0,'route_uncertain_only_train_applied':0.0,'U_ratio':0.0,'u_thr':0.0,'top_p_e':0.0,'k_unc':0.0}
+    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'assignment_stability':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'neg_per_anchor':0.0,'FN_count':0.0,'HN_count':0.0,'neg_count':0.0,'safe_neg_count':0.0,'candidate_neg_size':0.0,'routed_candidate_neg_size':0.0,'routed_stat_neg_size':0.0,'neg_after_filter_size':0.0,'neg_used_in_loss_size':0.0,'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':0.0,'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'sigma_s':0.05,'w_min':0.1,'p_fn_thr':0.5,'U_ratio':0.0,'u_thr':0.0,'top_p_e':0.0,'k_unc':0.0}
     batch_count = 0
     last_dump = {}
 
@@ -384,7 +344,7 @@ def contrastive_train(model, mv_data, mvc_loss,
 
         # ——— 4) 课程学习式不确定划分 ———
         u_det = u.detach()
-        u_thr_tensor = torch.quantile(u_det, max(0.0, min(1.0, 1.0 - top_p_e)))
+        u_thr_tensor = torch.quantile(u_det, 0.8)
         uncertain_mask = u_det >= u_thr_tensor
         if uncertain_mask.sum() == 0:
             uncertain_mask[torch.argmax(u_det)] = True
@@ -448,7 +408,7 @@ def contrastive_train(model, mv_data, mvc_loss,
                 'neg_per_anchor':neg_mask.float().sum(dim=1).mean().item(),'U_size':int(uncertain_mask.sum().item()),
                 'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':1.0,
                 'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,
-                'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'sigma_s':0.0,'w_min':0.1,'p_fn_thr':0.5,'fn_alpha_q':alpha_fn,'fn_prob_tau':fn_prob_tau,'tail_s_cap':tail_s_cap,'tail_beta':tail_beta,'route_uncertain_only_train_applied':float(route_uncertain_only_train_applied),
+                'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'sigma_s':0.05,'w_min':0.1,'p_fn_thr':0.5,
             }
             route_aux = {
                 'w_neg':w_neg,'neg_mask':neg_mask,'rho':rho_mat,'eta':eta_mat,
@@ -652,11 +612,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                                    feature_route_weight=1.0,
                                    y_prev_labels=None,
                                    lambda_cross=0.1,
-                                   cross_ramp_epochs=10,
-                                   fn_prob_tau=1.0,
-                                   tail_s_cap=0.9,
-                                   tail_beta=20.0,
-                                   route_uncertain_only_train_applied=False):
+                                   cross_ramp_epochs=10):
     """
     大数据集版 Contrastive Training：
     - k: 用于构建每个视图下的 k-NN 图
@@ -667,7 +623,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
     criterion = torch.nn.MSELoss()
     total_loss = 0.0
     epoch_meter = {'L_total':0.0,'L_recon':0.0,'L_feat':0.0,'L_cross':0.0,'L_cluster':0.0,'L_uncert':0.0,'L_hn':0.0,'L_reg':0.0}
-    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'assignment_stability':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'neg_per_anchor':0.0,'FN_count':0.0,'HN_count':0.0,'neg_count':0.0,'safe_neg_count':0.0,'candidate_neg_size':0.0,'routed_candidate_neg_size':0.0,'routed_stat_neg_size':0.0,'neg_after_filter_size':0.0,'neg_used_in_loss_size':0.0,'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':0.0,'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'sigma_s':0.0,'w_min':0.1,'p_fn_thr':0.5,'fn_alpha_q':0.1,'fn_prob_tau':1.0,'tail_s_cap':0.9,'tail_beta':20.0,'route_uncertain_only_train_applied':0.0,'U_ratio':0.0,'u_thr':0.0,'top_p_e':0.0,'k_unc':0.0}
+    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'assignment_stability':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'neg_per_anchor':0.0,'FN_count':0.0,'HN_count':0.0,'neg_count':0.0,'safe_neg_count':0.0,'candidate_neg_size':0.0,'routed_candidate_neg_size':0.0,'routed_stat_neg_size':0.0,'neg_after_filter_size':0.0,'neg_used_in_loss_size':0.0,'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':0.0,'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'sigma_s':0.05,'w_min':0.1,'p_fn_thr':0.5,'U_ratio':0.0,'u_thr':0.0,'top_p_e':0.0,'k_unc':0.0}
     batch_count = 0
     last_dump = {}
 
@@ -713,7 +669,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
 
         # ——— 课程学习式不确定划分 ———
         u_det = u.detach()
-        u_thr_tensor = torch.quantile(u_det, max(0.0, min(1.0, 1.0 - top_p)))
+        u_thr_tensor = torch.quantile(u_det, 0.8)
         uncertain = u_det >= u_thr_tensor
         if uncertain.sum() == 0:
             uncertain[torch.argmax(u_det)] = True
@@ -775,7 +731,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                 'neg_per_anchor':neg_mask.float().sum(dim=1).mean().item(),'U_size':int(uncertain.sum().item()),
                 'fn_pair_share':0.0,'hn_pair_share':0.0,'w_mean_on_FN':0.0,'w_mean_on_safe':1.0,
                 'tau_fn_p10':0.0,'tau_fn_p50':0.0,'tau_fn_p90':0.0,'tau_hn_p10':0.0,'tau_hn_p50':0.0,'tau_hn_p90':0.0,
-                'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'sigma_s':0.0,'w_min':0.1,'p_fn_thr':0.5,'fn_alpha_q':alpha_fn,'fn_prob_tau':fn_prob_tau,'tail_s_cap':tail_s_cap,'tail_beta':tail_beta,'route_uncertain_only_train_applied':float(route_uncertain_only_train_applied),
+                'FN_count_anchor_p50':0.0,'HN_count_anchor_p50':0.0,'sigma_s':0.05,'w_min':0.1,'p_fn_thr':0.5,
             }
             route_aux = {
                 'w_neg':w_neg,'neg_mask':neg_mask,'rho':rho_mat,'eta':eta_mat,

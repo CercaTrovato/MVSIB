@@ -659,15 +659,16 @@ def contrastive_train(model, mv_data, mvc_loss,
                 Lpen += Lpen_i.item()
                 loss_list.append(Lpen_i)
 
-            if epoch > cross_warmup_epochs:
-                cross_l = mvc_loss.cross_view_weighted_loss(model, zs, common_z, memberships, batch_psedo_label, temperature=temperature_f)
-                Lcross_i = gate_fn * beta * cross_l
-                Lcross += Lcross_i.item()
-                loss_list.append(Lcross_i)
-
             recon_loss = criterion(sub_data_views[v], xrs[v])
             Lrecon += recon_loss.item()
             loss_list.append(recon_loss)
+
+        if epoch > cross_warmup_epochs:
+            # Cross-view consistency should be computed once per batch to avoid num_views-times over-counting.
+            cross_l = mvc_loss.cross_view_weighted_loss(model, zs, common_z, memberships, batch_psedo_label, temperature=temperature_f)
+            Lcross_i = gate_fn * beta * cross_l
+            Lcross += Lcross_i.item()
+            loss_list.append(Lcross_i)
 
         if enable_star_modules:
             L_mmd, L_rep, L_excl = _ism_star_losses(
@@ -693,9 +694,6 @@ def contrastive_train(model, mv_data, mvc_loss,
         epoch_meter['L_cluster'] += Lcl
         epoch_meter['L_uncert'] += Lu
         epoch_meter['L_hn'] += Lpen
-        for k in route_meter:
-            route_meter[k] += route_stats.get(k, 0.0)
-        batch_count += 1
 
         m_cons = q if enable_star_modules else memberships[num_views]
         top2_m = torch.topk(m_cons, 2, dim=1).values
@@ -720,6 +718,10 @@ def contrastive_train(model, mv_data, mvc_loss,
                 f"w_mean={route_aux['w_neg'].mean().item():.4f} w_p10={torch.quantile(route_aux['w_neg'], 0.1).item():.4f} w_min={route_aux['w_neg'].min().item():.4f}"
             )
 
+        for k in route_meter:
+            route_meter[k] += route_stats.get(k, 0.0)
+        batch_count += 1
+
         last_dump = {
             'u_sample': u_hat.detach().cpu(),
             'gamma_sample': gamma.detach().cpu(),
@@ -730,10 +732,14 @@ def contrastive_train(model, mv_data, mvc_loss,
             'flip_mask_sample': ((batch_psedo_label != prev_batch).float().detach().cpu() if prev_batch is not None else torch.zeros_like(batch_psedo_label, dtype=torch.float32).detach().cpu()),
             'S_pair_sample': route_aux['r_fn'][route_aux['neg_mask']].detach().cpu() if 'r_fn' in route_aux else route_aux['S'][route_aux['neg_mask']].detach().cpu(),
             'w_pair_sample': route_aux['w_neg'][route_aux['neg_mask']].detach().cpu(),
+            'w_neg_pair_sample': route_aux['w_neg'][route_aux['neg_mask']].detach().cpu(),
             's_post_pair_sample': (q @ q.t())[route_aux['neg_mask']].detach().cpu(),
+            'p_same_pair_sample': (q @ q.t())[route_aux['neg_mask']].detach().cpu(),
             'sim_pair_sample': neg_sim.detach().cpu(),
             'rho_fn_pair_sample': (route_aux['r_fn'][route_aux['neg_mask']] > fn_ratio_cut).float().detach().cpu() if 'r_fn' in route_aux else route_aux['rho'][route_aux['neg_mask']].float().detach().cpu(),
             'eta_hn_pair_sample': (route_aux['r_hn'][route_aux['neg_mask']] > hn_ratio_cut).float().detach().cpu() if 'r_hn' in route_aux else route_aux['eta'][route_aux['neg_mask']].float().detach().cpu(),
+            'r_fn_pair_sample': route_aux['r_fn'][route_aux['neg_mask']].detach().cpu() if 'r_fn' in route_aux else route_aux['S'][route_aux['neg_mask']].detach().cpu(),
+            'r_hn_pair_sample': route_aux['r_hn'][route_aux['neg_mask']].detach().cpu() if 'r_hn' in route_aux else route_aux['sim'][route_aux['neg_mask']].detach().cpu(),
             'r_pair_sample': route_aux['r_fn'][route_aux['neg_mask']].detach().cpu() if 'r_fn' in route_aux else route_aux['r'][route_aux['neg_mask']].detach().cpu(),
             's_stab_pair_sample': torch.ones_like(neg_sim).detach().cpu(),
             'sim_pos_sample': F.cosine_similarity(zs[0], common_z, dim=1).detach().cpu(),
@@ -920,14 +926,16 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             Lpen = gate_hn * (lambda_hn_penalty * push + lambda_hn_penalty * pull)
             batch_loss += Lpen
 
-            # e) 跨视图加权 InfoNCE
-            if epoch > cross_warmup_epochs:
-                cross_l = mvc_loss.cross_view_weighted_loss(
-                    model, zs, common_z, memberships,
-                    batch_label, temperature=temperature_f
-                )
-                Lcross = gate_fn * beta * prog * cross_l
-                batch_loss += Lcross
+        # e) 跨视图加权 InfoNCE（每个 batch 只计算一次）
+        if epoch > cross_warmup_epochs:
+            cross_l = mvc_loss.cross_view_weighted_loss(
+                model, zs, common_z, memberships,
+                batch_label, temperature=temperature_f
+            )
+            Lcross = gate_fn * beta * prog * cross_l
+            batch_loss += Lcross
+        else:
+            Lcross = torch.tensor(0.0, device=device)
 
         # ——— 梯度更新 ———
         optimizer.zero_grad()
@@ -940,10 +948,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         epoch_meter['L_feat'] += Lfeat.item() if hasattr(Lfeat, 'item') else float(Lfeat)
         epoch_meter['L_uncert'] += Lu.item() if hasattr(Lu, 'item') else float(Lu)
         epoch_meter['L_hn'] += Lpen.item() if hasattr(Lpen, 'item') else float(Lpen)
-        epoch_meter['L_cross'] += Lcross.item() if ('Lcross' in locals() and hasattr(Lcross, 'item')) else 0.0
-        for k in route_meter:
-            route_meter[k] += route_stats.get(k, 0.0)
-        batch_count += 1
+        epoch_meter['L_cross'] += Lcross.item() if hasattr(Lcross, 'item') else float(Lcross)
 
         m_cons = memberships[num_views]
         top2_m = torch.topk(m_cons, 2, dim=1).values
@@ -955,6 +960,11 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         route_stats['u_thr'] = u_thr
         route_stats['top_p_e'] = top_p
         route_stats['k_unc'] = k_unc
+        route_stats['U_size'] = int(uncertain.sum().item())
+
+        for k in route_meter:
+            route_meter[k] += route_stats.get(k, 0.0)
+        batch_count += 1
 
         last_dump = {
             'u_sample': u_hat.detach().cpu(),
@@ -966,10 +976,14 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             'flip_mask_sample': ((batch_label != prev_batch).float().detach().cpu() if prev_batch is not None else torch.zeros_like(batch_label, dtype=torch.float32).detach().cpu()),
             'S_pair_sample': route_aux['S'][route_aux['neg_mask']].detach().cpu(),
             'w_pair_sample': route_aux['w_neg'][route_aux['neg_mask']].detach().cpu(),
+            'w_neg_pair_sample': route_aux['w_neg'][route_aux['neg_mask']].detach().cpu(),
             's_post_pair_sample': route_aux['s_post'][route_aux['neg_mask']].detach().cpu(),
+            'p_same_pair_sample': route_aux['s_post'][route_aux['neg_mask']].detach().cpu(),
             'sim_pair_sample': neg_sim.detach().cpu(),
             'rho_fn_pair_sample': route_aux['rho'][route_aux['neg_mask']].float().detach().cpu(),
             'eta_hn_pair_sample': route_aux['eta'][route_aux['neg_mask']].float().detach().cpu(),
+            'r_fn_pair_sample': route_aux['S'][route_aux['neg_mask']].detach().cpu(),
+            'r_hn_pair_sample': route_aux['sim'][route_aux['neg_mask']].detach().cpu(),
             'r_pair_sample': route_aux['r'][route_aux['neg_mask']].detach().cpu(),
             's_stab_pair_sample': route_aux['s_stab'][route_aux['neg_mask']].detach().cpu(),
             'sim_pos_sample': pos_sim.detach().cpu(),

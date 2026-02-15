@@ -67,6 +67,8 @@ class Network(nn.Module):
         self.step = 0
         self.psedo_labels = torch.zeros(num_samples, dtype=torch.long)
         self.weights = nn.Parameter(torch.full((self.num_views,), 1 / self.num_views), requires_grad=True)
+        # Prototype-margin uncertainty threshold kappa: 仅在 epoch=1 初始化一次后固定。
+        self.register_buffer('uncertain_kappa', torch.tensor(float('nan')))
 
         # —— 模块1：簇中心与带宽 σ存储 ——
         self.centers = [None] * (self.num_views + 1)
@@ -243,44 +245,27 @@ class Network(nn.Module):
         membership = unnorm / (unnorm.sum(dim=1, keepdim=True) + 1e-12)
         return membership
 
-    def estimate_uncertainty(self, memberships, common_z):
-        """
-        SCE 不确定度：
-        - legacy: 熵 + Top-2 gap + max-view 融合（原路径）
-        - entropy: 方案A，基于归一化熵的无参不确定度（推荐）
-        """
-        V = self.num_views
+    def compute_prototype_margin(self, common_z):
+        centers = self.centers[self.num_views]
+        sim_proto = F.cosine_similarity(common_z.unsqueeze(1), centers.unsqueeze(0), dim=2)
+        top2 = torch.topk(sim_proto, k=min(2, sim_proto.size(1)), dim=1).values
+        if top2.size(1) == 1:
+            return torch.zeros(common_z.size(0), device=common_z.device)
+        return top2[:, 0] - top2[:, 1]
 
-        if self.uncertainty_mode == 'legacy':
-            u_vs = []
-            for v in range(V):
-                m = memberships[v]  # (N, L)
-                top2 = torch.topk(m, 2, dim=1).values
-                delta = top2[:, 0] - top2[:, 1]
-                delta_norm = (delta - delta.min()) / (delta.max() - delta.min() + 1e-12)
-                ent = -torch.sum(m * torch.log(m + 1e-12), dim=1)
-                ent_norm = (ent - ent.min()) / (ent.max() - ent.min() + 1e-12)
-                u_v = 0.5 * ent_norm + 0.5 * (1.0 - delta_norm)
-                u_vs.append(u_v)
+    def init_uncertainty_kappa(self, delta_epoch, q, epoch):
+        if epoch == 1 and (not torch.isfinite(self.uncertain_kappa)):
+            self.uncertain_kappa = torch.quantile(delta_epoch.detach(), q).to(self.uncertain_kappa.device)
 
-            u_stack = torch.stack(u_vs, dim=1)
-            u = u_stack.max(dim=1).values
-            u_hat = self.mlp_uncert(common_z).squeeze(1)
-            return u, u_hat
-
-        # 方案A（无参）：归一化熵不确定度，跨视图取 max（最保守）
-        u_vs = []
-        for v in range(V):
-            m = memberships[v]
-            entropy_v = -torch.sum(m * torch.log(m + self.eps), dim=1)
-            u_v = (entropy_v / torch.log(torch.tensor(float(self.num_clusters), device=m.device))).clamp(0.0, 1.0)
-            u_vs.append(u_v)
-
-        u_stack = torch.stack(u_vs, dim=1)
-        u = u_stack.max(dim=1).values
-
+    def estimate_uncertainty(self, common_z, sigma_u=0.1):
+        # 对应新理论：u=sigmoid((kappa-delta)/sigma_u)，uncertain由 delta<kappa 决定。
+        delta = self.compute_prototype_margin(common_z)
+        kappa = self.uncertain_kappa
+        if not torch.isfinite(kappa):
+            kappa = torch.quantile(delta.detach(), 0.8)
+        u = torch.sigmoid((kappa - delta) / max(float(sigma_u), self.eps))
         u_hat = self.mlp_uncert(common_z).squeeze(1)
-        return u, u_hat
+        return u, u_hat, delta
 
     def classify_fn_hn(self,
                        zs_list, common_z, memberships,

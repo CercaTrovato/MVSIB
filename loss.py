@@ -61,7 +61,7 @@ class Loss(nn.Module):
         self.mse = nn.MSELoss()
         self.ce  = nn.CrossEntropyLoss()
 
-    def feature_loss(self, zi, z, w, y_pse, neg_weights=None):
+    def feature_loss(self, zi, z, w, y_pse, neg_weights=None, neg_bias=None):
         """
         zi: [N, D], z: [N, D]
         w:  [N, N] integer mask (0/1)
@@ -97,15 +97,22 @@ class Loss(nn.Module):
         positive_loss = -positive_term  # 保持原来 “-sum(...)”
 
         # —— 5) negative loss ——
-        neg_mask = (~w_mask) & (y_pse == 0)
+        # negatives 仅由伪标签异簇决定；w_mask 只用于 positives，避免路由统计与loss分母不一致。
+        neg_mask = (~eye) & (y_pse == 0)
         NEG_INF = torch.tensor(float('-inf'), device=device)
 
         neg_weight_mat = torch.ones_like(y_pse, device=device)
         if neg_weights is not None:
             neg_weight_mat = neg_weights.to(device).float().clamp(min=0.0)
 
-        neg_cross = (neg_weight_mat * cross_view_distance).masked_fill(~neg_mask, NEG_INF)
-        neg_inter = (neg_weight_mat * inter_view_distance).masked_fill(~neg_mask, NEG_INF)
+        if neg_bias is None:
+            neg_bias = torch.zeros_like(y_pse, device=device)
+        else:
+            neg_bias = neg_bias.to(device).float()
+
+        # 新理论：不丢弃任何负对，只对neg logits添加bias。
+        neg_cross = (neg_weight_mat * cross_view_distance + neg_bias).masked_fill(~neg_mask, NEG_INF)
+        neg_inter = (neg_weight_mat * inter_view_distance + neg_bias).masked_fill(~neg_mask, NEG_INF)
 
         # 拼到一起（cross/inter logits 已在上游按 temperature 缩放，这里不再重复除温度）
         neg_sim = torch.cat([neg_inter, neg_cross], dim=1)
@@ -386,6 +393,25 @@ class Loss(nn.Module):
     def uncertainty_regression_loss(self, u_hat, u_true):
 
         return self.mse(u_hat, u_true.detach())
+
+    def fn_attraction_loss(self, sim_ij, p_fn, route_mask, tau_pos=0.5):
+        if not route_mask.any():
+            return torch.tensor(0.0, device=sim_ij.device)
+        logits = sim_ij[route_mask] / tau_pos
+        weights = p_fn[route_mask]
+        loss = -torch.log(torch.sigmoid(logits) + 1e-12)
+        return (weights * loss).sum() / (weights.sum() + 1e-12)
+
+    def hn_prototype_margin_loss(self, common_z, labels, centers, u, p_hn, margin=0.2):
+        sim_proto = F.cosine_similarity(common_z.unsqueeze(1), centers.unsqueeze(0), dim=2)
+        own = sim_proto[torch.arange(common_z.size(0), device=common_z.device), labels]
+        wrong = sim_proto.clone()
+        wrong[torch.arange(common_z.size(0), device=common_z.device), labels] = -1e6
+        nearest_wrong = wrong.max(dim=1).values
+        hinge = F.relu(margin + nearest_wrong - own)
+        hn_anchor_strength = p_hn.sum(dim=1).detach()
+        weight = (u * hn_anchor_strength)
+        return (weight * hinge).sum() / (weight.sum() + 1e-12)
 
 
     # —— 模块4：加权 InfoNCE —— #

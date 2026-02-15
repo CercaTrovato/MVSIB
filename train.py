@@ -35,7 +35,7 @@ parser.add_argument('--cross_warmup_epochs', default=50, type=int,
                     help='Epoch to start cross-view weighted consistency loss (Stage-3).')
 parser.add_argument('--cross_ramp_epochs', default=10, type=int,
                     help='Ramp epochs for cross-view loss after cross warmup.')
-parser.add_argument('--lambda_cross', default=1.0, type=float,
+parser.add_argument('--lambda_cross', default=0.1, type=float,
                     help='Extra global weight for cross-view loss.')
 parser.add_argument('--membership_mode', default='softmax_distance', type=str,
                     choices=['gaussian', 'softmax_distance'],

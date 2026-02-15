@@ -98,20 +98,17 @@ class Loss(nn.Module):
 
         # —— 5) negative loss ——
         neg_mask = (~w_mask) & (y_pse == 0)
-        SMALL_NUM = torch.log(torch.tensor(1e-45, device=device))
+        NEG_INF = torch.tensor(float('-inf'), device=device)
 
         neg_weight_mat = torch.ones_like(y_pse, device=device)
         if neg_weights is not None:
             neg_weight_mat = neg_weights.to(device).float().clamp(min=0.0)
 
-        neg_cross = (neg_mask.float() * neg_weight_mat * cross_view_distance)
-        neg_cross = neg_cross.masked_fill(neg_cross == 0, SMALL_NUM)
+        neg_cross = (neg_weight_mat * cross_view_distance).masked_fill(~neg_mask, NEG_INF)
+        neg_inter = (neg_weight_mat * inter_view_distance).masked_fill(~neg_mask, NEG_INF)
 
-        neg_inter = (neg_mask.float() * neg_weight_mat * inter_view_distance)
-        neg_inter = neg_inter.masked_fill(neg_inter == 0, SMALL_NUM)
-
-        # 拼到一起，再除一次 temperature（可根据实际 remove）
-        neg_sim = torch.cat([neg_inter, neg_cross], dim=1) / self.temperature_f
+        # 拼到一起（cross/inter logits 已在上游按 temperature 缩放，这里不再重复除温度）
+        neg_sim = torch.cat([neg_inter, neg_cross], dim=1)
         neg_loss = torch.logsumexp(neg_sim, dim=1).sum()
 
         # —— 6) 最终归一 ——
@@ -208,6 +205,9 @@ class Loss(nn.Module):
         device = q_centers.device
         L, D = q_centers.shape
 
+        def _safe_exp(x):
+            return torch.exp(torch.clamp(x, min=-30.0, max=30.0))
+
         # 1) 计算基础相似度矩阵 d_q
         d_q_raw = q_centers.mm(q_centers.T)
         with torch.no_grad():
@@ -228,8 +228,8 @@ class Loss(nn.Module):
             for k in range(L):
                 if k in zero_classes:
                     continue
-                pos = torch.exp(d_q[k, k])
-                neg = (torch.exp(d_q[k, :]) * (~eye[k]).float()).sum()
+                pos = _safe_exp(d_q[k, k])
+                neg = (_safe_exp(d_q[k, :]) * (~eye[k]).float()).sum()
                 losses.append(-torch.log(pos / (pos + neg + 1e-8)))
             num_nonzero = L - zero_classes.numel()
             return torch.stack(losses).sum() / num_nonzero if num_nonzero > 0 else torch.tensor(0., device=device)
@@ -293,16 +293,16 @@ class Loss(nn.Module):
             for k in range(L):
                 if k in zero_classes:
                     continue
-                pos_main = torch.exp(d_q[k, k])
+                pos_main = _safe_exp(d_q[k, k])
                 if batch_minority_mask[k]:
-                    pos_main = pos_main + torch.exp(sim_pseudo_all[k, k])
+                    pos_main = pos_main + _safe_exp(sim_pseudo_all[k, k])
                 dq_row = d_q[k]
                 mask_neg = (~eye_mask[k]).float()
-                neg_real = (torch.exp(dq_row) * mask_neg).sum()
+                neg_real = (_safe_exp(dq_row) * mask_neg).sum()
                 neg_pseudo = 0
                 if minority_indices.numel() > 0:
                     mask_minor = batch_minority_mask.float().to(device) * mask_neg
-                    neg_pseudo = (torch.exp(sim_pseudo_all[k]) * mask_minor).sum()
+                    neg_pseudo = (_safe_exp(sim_pseudo_all[k]) * mask_minor).sum()
                 denom = pos_main + neg_real + neg_pseudo + 1e-8
                 losses.append(-torch.log(pos_main / denom))
             cluster_loss = torch.stack(losses).sum() / (
@@ -356,16 +356,16 @@ class Loss(nn.Module):
         for k in range(L):
             if k in zero_classes:
                 continue
-            pos_main = torch.exp(d_q[k, k])
+            pos_main = _safe_exp(d_q[k, k])
             if batch_minority_mask[k]:
-                pos_main = pos_main + torch.exp(sim_pseudo_all[k, k])
+                pos_main = pos_main + _safe_exp(sim_pseudo_all[k, k])
             dq_row = d_q[k]
             mask_neg = (~eye_mask[k]).float()
-            neg_real = (torch.exp(dq_row) * mask_neg).sum()
+            neg_real = (_safe_exp(dq_row) * mask_neg).sum()
             neg_pseudo = 0
             if minority_indices.numel() > 0:
                 mask_minor = batch_minority_mask.float().to(device) * mask_neg
-                neg_pseudo = (torch.exp(sim_pseudo_all[k]) * mask_minor).sum()
+                neg_pseudo = (_safe_exp(sim_pseudo_all[k]) * mask_minor).sum()
             denom = pos_main + neg_real + neg_pseudo + 1e-8
             losses.append(-torch.log(pos_main / denom))
         cluster_loss = torch.stack(losses).sum() / (
@@ -396,7 +396,8 @@ class Loss(nn.Module):
         S = S.clone()
         eye = torch.eye(S.size(0), device=S.device, dtype=torch.bool)
         S = S.masked_fill(eye, 0.0)
-        S = S / (S.sum(dim=1, keepdim=True) + 1e-8)
+        row_mass = torch.clamp(S.sum(dim=1, keepdim=True), min=1e-3)
+        S = S / row_mass
 
         # 使用归一化后的 S 对所有样本对进行加权
         exp_sim = torch.exp(sim)  # (N, N)
@@ -437,4 +438,5 @@ class Loss(nn.Module):
         for z in zs_list:
             loss += self.weighted_info_nce(z, S, temperature)
         loss += self.weighted_info_nce(common_z, S, temperature)
-        return loss
+        # 按 (V+1) 平均，避免跨视图项随视图数线性放大
+        return loss / max(float(len(zs_list) + 1), 1.0)

@@ -102,6 +102,12 @@ parser.add_argument('--lambda_share', default=1.0, type=float)
 parser.add_argument('--lambda_ism', default=0.2, type=float)
 parser.add_argument('--lambda_rep', default=0.1, type=float)
 parser.add_argument('--lambda_excl', default=0.1, type=float)
+parser.add_argument('--vote_warmup_epochs', default=8, type=int,
+                    help='Warmup epochs for vote fusion weight to avoid early over-dominance.')
+parser.add_argument('--sce_vote_eps', default=0.05, type=float,
+                    help='Uniform smoothing ratio for vote to prevent one-hot collapse in SCE*.')
+parser.add_argument('--debug_star_epochs', default=5, type=int,
+                    help='Epochs to print SCE*/CSD* sanity checks for u/vote/g/w_neg.')
 args = parser.parse_args()
 
 
@@ -270,6 +276,9 @@ if __name__ == "__main__":
                 lambda_ism=args.lambda_ism,
                 lambda_rep=args.lambda_rep,
                 lambda_excl=args.lambda_excl,
+                vote_warmup_epochs=args.vote_warmup_epochs,
+                sce_vote_eps=args.sce_vote_eps,
+                debug_star_epochs=args.debug_star_epochs,
             )
 
             epoch_list.append(epoch)

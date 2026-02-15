@@ -63,11 +63,35 @@ parser.add_argument('--uncert_decay_epochs', default=20, type=int,
                     help='Epochs for linear uncertainty top-p decay.')
 parser.add_argument('--fn_prob_tau', default=1.0, type=float,
                     help='Temperature for quantile-based FN probability mapping.')
+parser.add_argument('--uncert_kappa_init_q', default=0.2, type=float,
+                    help='Initialize kappa once at epoch1 as quantile(delta, q).')
+parser.add_argument('--sigma_u', default=0.1, type=float,
+                    help='Scale in u=sigmoid((kappa-delta)/sigma_u).')
+parser.add_argument('--sigma_t', default=0.1, type=float,
+                    help='Temperature for FN prototype consistency gate.')
+parser.add_argument('--gamma_u', default=2.0, type=float,
+                    help='Uncertainty exponent in FN/HN probabilities.')
+parser.add_argument('--tau_hn', default=0.2, type=float,
+                    help='HN prototype threshold.')
+parser.add_argument('--sigma_hn', default=0.1, type=float,
+                    help='Temperature for HN prototype gate.')
+parser.add_argument('--hn_z0', default=0.0, type=float,
+                    help='HN z-score center for TN-normalized similarity.')
+parser.add_argument('--hn_zs', default=1.0, type=float,
+                    help='HN z-score temperature for TN-normalized similarity.')
+parser.add_argument('--tau_pos', default=0.5, type=float,
+                    help='Positive temperature in FN attraction loss.')
+parser.add_argument('--hn_margin', default=0.2, type=float,
+                    help='Prototype hinge margin for HN anchors.')
+parser.add_argument('--lambda_fn_attr', default=0.1, type=float,
+                    help='Weight of U-only FN attraction loss.')
+parser.add_argument('--lambda_hn_margin', default=0.1, type=float,
+                    help='Weight of U-only HN prototype margin loss.')
 parser.add_argument('--tail_s_cap', default=0.90, type=float,
                     help='Similarity cap for hard-tail suppression.')
 parser.add_argument('--tail_beta', default=20.0, type=float,
                     help='Strength for hard-tail suppression.')
-parser.add_argument('--route_uncertain_only_train_applied', default=False, type=lambda x: x.lower()=='true',
+parser.add_argument('--route_uncertain_only_train_applied', default=True, type=lambda x: x.lower()=='true',
                     help='Whether uncertain-only gating is truly applied to training weights (otherwise stat-only).')
 parser.add_argument('--log_dist_interval', default=5, type=int,
                     help='Epoch interval for DISTR summary and debug dump.')
@@ -290,6 +314,18 @@ if __name__ == "__main__":
                 tail_beta=args.tail_beta,
                 route_uncertain_only_train_applied=args.route_uncertain_only_train_applied,
                 y_prev_labels=y_prev,
+                uncert_kappa_init_q=args.uncert_kappa_init_q,
+                sigma_u=args.sigma_u,
+                sigma_t=args.sigma_t,
+                gamma_u=args.gamma_u,
+                tau_hn=args.tau_hn,
+                sigma_hn=args.sigma_hn,
+                hn_z0=args.hn_z0,
+                hn_zs=args.hn_zs,
+                tau_pos=args.tau_pos,
+                hn_margin=args.hn_margin,
+                lambda_fn_attr=args.lambda_fn_attr,
+                lambda_hn_margin=args.lambda_hn_margin,
             )
 
             epoch_list.append(epoch)

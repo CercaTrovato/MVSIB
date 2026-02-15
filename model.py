@@ -318,14 +318,14 @@ def contrastive_train(model, mv_data, mvc_loss,
         w_mean_safe = _safe_mean(w_ij[safe_non_hn_mask])
         w_hit_min_ratio = float((w_ij[route_mask] <= route_meter['w_min']).float().mean().item()) if route_mask.any() else 0.0
         epoch_meter['L_total'] += batch_loss.item()
-        epoch_meter['L_recon'] += float(L_recon)
-        epoch_meter['L_feat'] += float(L_feat)
-        epoch_meter['L_cluster'] += float(L_cluster)
-        epoch_meter['L_uncert'] += float(L_uncert)
-        epoch_meter['L_hn'] += float(L_hn)
+        epoch_meter['L_recon'] += L_recon.detach().item()
+        epoch_meter['L_feat'] += L_feat.detach().item()
+        epoch_meter['L_cluster'] += L_cluster.detach().item()
+        epoch_meter['L_uncert'] += L_uncert.detach().item()
+        epoch_meter['L_hn'] += L_hn.detach().item()
         epoch_meter['L_cross'] += float(L_cross)
-        epoch_meter['L_fn_attr'] += float(L_fn_attr)
-        epoch_meter['L_hn_margin'] += float(L_hn_margin)
+        epoch_meter['L_fn_attr'] += L_fn_attr.detach().item()
+        epoch_meter['L_hn_margin'] += L_hn_margin.detach().item()
 
         route_meter['fn_ratio'] += fn_cnt / max(routed_cnt, 1.0)
         route_meter['hn_ratio'] += hn_cnt / max(routed_cnt, 1.0)
@@ -389,3 +389,70 @@ def contrastive_train(model, mv_data, mvc_loss,
         'warmup_epochs': warmup_epochs,
         'cross_warmup_epochs': cross_warmup_epochs,
     }
+
+
+def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
+                                   batch_size, epoch, k,
+                                   alpha, beta, optimizer,
+                                   warmup_epochs,
+                                   lambda_u, lambda_hn_penalty,
+                                   temperature_f, max_epoch=100,
+                                   initial_top_p=0.3,
+                                   p_min=0.05,
+                                   uncert_decay_epochs=20,
+                                   cross_warmup_epochs=50,
+                                   alpha_fn=0.1,
+                                   hn_beta=0.1,
+                                   neg_mode='batch',
+                                   knn_neg_k=20,
+                                   route_uncertain_only=True,
+                                   fn_route_warmup_epochs=15,
+                                   feature_base_weight=1.0,
+                                   feature_route_weight=1.0,
+                                   y_prev_labels=None,
+                                   lambda_cross=0.1,
+                                   cross_ramp_epochs=10,
+                                   fn_prob_tau=0.5,
+                                   tail_s_cap=0.5,
+                                   tail_beta=4.0,
+                                   route_uncertain_only_train_applied=True,
+                                   uncert_kappa_init_q=0.8,
+                                   sigma_u=0.1,
+                                   sigma_t=0.1,
+                                   gamma_u=2.0,
+                                   tau_hn=0.2,
+                                   sigma_hn=0.1,
+                                   hn_z0=0.0,
+                                   hn_zs=1.0,
+                                   tau_pos=0.5,
+                                   hn_margin=0.2,
+                                   lambda_fn_attr=0.1,
+                                   lambda_hn_margin=0.1):
+    # Large-dataset path reuses the same contrastive objective to keep signatures compatible.
+    return contrastive_train(
+        model, mv_data, mvc_loss,
+        batch_size, epoch, W=None,
+        alpha=alpha, beta=beta,
+        optimizer=optimizer,
+        warmup_epochs=warmup_epochs,
+        lambda_u=lambda_u, lambda_hn_penalty=lambda_hn_penalty,
+        temperature_f=temperature_f, max_epoch=max_epoch,
+        initial_top_p=initial_top_p, p_min=p_min, uncert_decay_epochs=uncert_decay_epochs,
+        cross_warmup_epochs=cross_warmup_epochs,
+        alpha_fn=alpha_fn, hn_beta=hn_beta,
+        neg_mode=neg_mode, knn_neg_k=knn_neg_k,
+        route_uncertain_only=route_uncertain_only,
+        fn_route_warmup_epochs=fn_route_warmup_epochs,
+        feature_base_weight=feature_base_weight,
+        feature_route_weight=feature_route_weight,
+        y_prev_labels=y_prev_labels,
+        lambda_cross=lambda_cross, cross_ramp_epochs=cross_ramp_epochs,
+        fn_prob_tau=fn_prob_tau,
+        tail_s_cap=tail_s_cap, tail_beta=tail_beta,
+        route_uncertain_only_train_applied=route_uncertain_only_train_applied,
+        uncert_kappa_init_q=uncert_kappa_init_q,
+        sigma_u=sigma_u, sigma_t=sigma_t, gamma_u=gamma_u,
+        tau_hn=tau_hn, sigma_hn=sigma_hn, hn_z0=hn_z0, hn_zs=hn_zs,
+        tau_pos=tau_pos, hn_margin=hn_margin,
+        lambda_fn_attr=lambda_fn_attr, lambda_hn_margin=lambda_hn_margin,
+    )

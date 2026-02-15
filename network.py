@@ -45,7 +45,11 @@ class Network(nn.Module):
                  fn_hn_k=5,       # kNN 邻居数,
                  fn_hn_hidden=64,  # MLP2 隐藏维度
                  membership_mode='softmax_distance',
-                 uncertainty_mode='entropy'):
+                 membership_temperature=1.0,
+                 uncertainty_mode='log_odds',
+                 uncertainty_kappa=1.0,
+                 uncertainty_temperature=0.5,
+                 reliability_temperature=0.5):
 
         super(Network, self).__init__()
         self.encoders = []
@@ -61,14 +65,16 @@ class Network(nn.Module):
         self.device = device
         self.tau = tau
         self.eps = eps
-        # SCE 改进配置：支持 legacy 与无参 top2-gap 两条可切换路径，便于做消融对照
+        # SCE 改进配置：支持 legacy 与 log-odds 两条可切换路径，便于做消融对照
         self.membership_mode = membership_mode
+        self.membership_temperature = membership_temperature
         self.uncertainty_mode = uncertainty_mode
+        self.uncertainty_kappa = uncertainty_kappa
+        self.uncertainty_temperature = uncertainty_temperature
+        self.reliability_temperature = reliability_temperature
         self.step = 0
         self.psedo_labels = torch.zeros(num_samples, dtype=torch.long)
         self.weights = nn.Parameter(torch.full((self.num_views,), 1 / self.num_views), requires_grad=True)
-        # Prototype-margin uncertainty threshold kappa: 仅在 epoch=1 初始化一次后固定。
-        self.register_buffer('uncertain_kappa', torch.tensor(float('nan')))
 
         # —— 模块1：簇中心与带宽 σ存储 ——
         self.centers = [None] * (self.num_views + 1)
@@ -121,45 +127,28 @@ class Network(nn.Module):
         return common_z
 
 # 1.4 簇中心计算（compute_centers）对应论文 Eq.(6)-(7)
-    def compute_centers(self, x, psedo_labels, eps=1e-12):
+    def compute_centers(self, x, psedo_labels):
         """
-        安全版本：允许空簇，不产生 NaN。
-        - centers = mean(x in cluster)
-        - 空簇：优先回填上一次共识中心；否则用随机单位向量
+        严格复刻原版权重矩阵 @ x 的写法，100% 等价于 F.normalize(one_hot,1)@x
         """
         device = x.device
         ps = psedo_labels.to(device)
         N, d = x.shape
         L = self.num_clusters
 
-        # one-hot (L,N)
+        # —— 1) 构造 one-hot 矩阵 (L, N) ——
         weight = torch.zeros(L, N, device=device)
         weight[ps, torch.arange(N, device=device)] = 1.0
 
-        row_sum = weight.sum(dim=1, keepdim=True)  # (L,1)
-        non_empty = (row_sum.squeeze(1) > 0)  # (L,)
+        # —— 2) L1 归一化每行 ——
+        weight = F.normalize(weight, p=1, dim=1)  # 保证每行加和=1
 
-        # safe row-normalize
-        weight = weight / row_sum.clamp_min(eps)
-        centers = weight @ x  # (L,d)
+        # —— 3) centers = weight @ x ——
+        centers = weight @ x  # (L, d)
 
-        # fill empty clusters
-        if not torch.all(non_empty):
-            prev = None
-            if isinstance(self.centers, list) and self.centers[self.num_views] is not None:
-                prev = self.centers[self.num_views].to(device)
-                if not torch.isfinite(prev).all():
-                    prev = None
-
-            rand = torch.randn(L, d, device=device)
-            rand = F.normalize(rand, p=2, dim=1)
-
-            if prev is not None:
-                centers[~non_empty] = prev[~non_empty]
-            else:
-                centers[~non_empty] = rand[~non_empty]
-
+        # —— 4) L2 归一化每个中心 ——
         centers = F.normalize(centers, p=2, dim=1)
+
         return centers
 
     def clustering(self, features):
@@ -170,14 +159,8 @@ class Network(nn.Module):
             'n_clusters': self.num_clusters,
             'verbose': False
         }
-        if not torch.isfinite(features).all():
-            print("[WARN] clustering skipped due to NaN/Inf features; fallback pseudo labels used")
-            return (torch.arange(features.size(0), device=features.device) % self.num_clusters).long()
         clustering_model = torch_clustering.PyTorchKMeans(init='k-means++', max_iter=300, tol=1e-4, **kwargs)
         psedo_labels = clustering_model.fit_predict(features.to(dtype=torch.float64))
-        if psedo_labels is None:
-            print("[WARN] clustering returned None; fallback pseudo labels used")
-            return (torch.arange(features.size(0), device=features.device) % self.num_clusters).long()
 
         return psedo_labels
 
@@ -204,14 +187,8 @@ class Network(nn.Module):
                     random_state=0,
                     verbose=False
                 )
-                # fit_predict 不会记录计算图；若输入异常则跳过本次中心更新以保证训练可继续。
-                z64 = z.to(dtype=torch.float64)
-                if not torch.isfinite(z64).all():
-                    continue
-                labels = km.fit_predict(z64)
-                if labels is None:
-                    continue
-                labels = labels.to(self.device).long()
+                # fit_predict 不会记录计算图
+                labels = km.fit_predict(z.to(dtype=torch.float64)).to(self.device).long()
                 centers = km.cluster_centers_.to(dtype=z.dtype).to(self.device)  # (L, d)
 
                 # 计算每个样本到其簇中心的距离
@@ -236,21 +213,13 @@ class Network(nn.Module):
         """
         计算视图 v 或共识空间的隶属度 (N×L)。
         - legacy: Gaussian-kernel membership（原始 Eq.(6)-(7) 风格）
-        - softmax_distance: softmax(-d/scale_i)（改进版，样本自归一化降低温度超参敏感性）
+        - softmax_distance: softmax(-d/T_m)（改进版，降低 \sigma 估计噪声敏感性）
         """
         centers = self.centers[v_index]  # (L, d)
 
         if self.membership_mode == 'softmax_distance':
             dists_sq = torch.cdist(z, centers, p=2) ** 2
-            # gap-scaled 无参 membership：用最近两中心距离差自归一化，避免 median 尺度造成过平分配。
-            top2 = torch.topk(dists_sq, k=min(2, dists_sq.size(1)), largest=False, dim=1).values
-            d1 = top2[:, 0:1]
-            if top2.size(1) > 1:
-                d2 = top2[:, 1:2]
-            else:
-                d2 = d1 + 1.0
-            gap = (d2 - d1).clamp(min=self.eps).detach()
-            logits = -(dists_sq - d1) / gap
+            logits = -dists_sq / max(self.membership_temperature, self.eps)
             membership = torch.softmax(logits, dim=1)
             return membership
 
@@ -262,27 +231,49 @@ class Network(nn.Module):
         membership = unnorm / (unnorm.sum(dim=1, keepdim=True) + 1e-12)
         return membership
 
-    def compute_prototype_margin(self, common_z):
-        centers = self.centers[self.num_views]
-        sim_proto = F.cosine_similarity(common_z.unsqueeze(1), centers.unsqueeze(0), dim=2)
-        top2 = torch.topk(sim_proto, k=min(2, sim_proto.size(1)), dim=1).values
-        if top2.size(1) == 1:
-            return torch.zeros(common_z.size(0), device=common_z.device)
-        return top2[:, 0] - top2[:, 1]
+    def estimate_uncertainty(self, memberships, common_z):
+        """
+        SCE 不确定度：
+        - legacy: 熵 + Top-2 gap + max-view 融合（原路径）
+        - log_odds: 方案A，基于 log-odds margin + 可靠性加权跨视图融合（推荐）
+        """
+        V = self.num_views
 
-    def init_uncertainty_kappa(self, delta_epoch, q, epoch):
-        if epoch == 1 and (not torch.isfinite(self.uncertain_kappa)):
-            self.uncertain_kappa = torch.quantile(delta_epoch.detach(), q).to(self.uncertain_kappa.device)
+        if self.uncertainty_mode == 'legacy':
+            u_vs = []
+            for v in range(V):
+                m = memberships[v]  # (N, L)
+                top2 = torch.topk(m, 2, dim=1).values
+                delta = top2[:, 0] - top2[:, 1]
+                delta_norm = (delta - delta.min()) / (delta.max() - delta.min() + 1e-12)
+                ent = -torch.sum(m * torch.log(m + 1e-12), dim=1)
+                ent_norm = (ent - ent.min()) / (ent.max() - ent.min() + 1e-12)
+                u_v = 0.5 * ent_norm + 0.5 * (1.0 - delta_norm)
+                u_vs.append(u_v)
 
-    def estimate_uncertainty(self, common_z, sigma_u=0.1):
-        # 对应新理论：u=sigmoid((kappa-delta)/sigma_u)，uncertain由 delta<kappa 决定。
-        delta = self.compute_prototype_margin(common_z)
-        kappa = self.uncertain_kappa
-        if not torch.isfinite(kappa):
-            kappa = torch.quantile(delta.detach(), 0.8)
-        u = torch.sigmoid((kappa - delta) / max(float(sigma_u), self.eps))
+            u_stack = torch.stack(u_vs, dim=1)
+            u = u_stack.max(dim=1).values
+            u_hat = self.mlp_uncert(common_z).squeeze(1)
+            return u, u_hat
+
+        # 方案A：log-odds margin -> sigmoid，跨视图用可靠性 softmax 融合
+        u_vs = []
+        gamma_vs = []
+        for v in range(V):
+            m = memberships[v]
+            top2 = torch.topk(m, 2, dim=1).values
+            gamma_v = torch.log((top2[:, 0] + self.eps) / (top2[:, 1] + self.eps))
+            u_v = torch.sigmoid((self.uncertainty_kappa - gamma_v) / max(self.uncertainty_temperature, self.eps))
+            gamma_vs.append(gamma_v)
+            u_vs.append(u_v)
+
+        gamma_stack = torch.stack(gamma_vs, dim=1)  # (N, V)
+        u_stack = torch.stack(u_vs, dim=1)          # (N, V)
+        view_weights = torch.softmax(gamma_stack / max(self.reliability_temperature, self.eps), dim=1)
+        u = (view_weights * u_stack).sum(dim=1)
+
         u_hat = self.mlp_uncert(common_z).squeeze(1)
-        return u, u_hat, delta
+        return u, u_hat
 
     def classify_fn_hn(self,
                        zs_list, common_z, memberships,
@@ -377,7 +368,6 @@ class Network(nn.Module):
         device = self.device
 
         # 1) 提取各视图和共识的 “conf” 向量
-        same = (batch_psedo_label.view(-1, 1) == batch_psedo_label.view(1, -1)).float().to(device)
         conf_v = torch.stack([
             memberships[v][torch.arange(N, device=device), batch_psedo_label]
             for v in range(V)
@@ -385,22 +375,35 @@ class Network(nn.Module):
 
         conf_c = memberships[V][torch.arange(N, device=device), batch_psedo_label].to(device)  # (N,)
 
-        # 2) 计算每个样本可靠性 r_i（由归一化熵不确定度导出，方向与置信度一致）
+        # 2) 计算每个视图的不确定度
         u_vs = []
         for v in range(V):
             m = memberships[v]  # (N, L)
-            entropy_v = -torch.sum(m * torch.log(m + self.eps), dim=1)
-            u_vs.append((entropy_v / torch.log(torch.tensor(float(self.num_clusters), device=m.device))).clamp(0.0, 1.0))
+            # Top-2 差异计算
+            top2 = torch.topk(m, 2, dim=1).values  # (N, 2)
+            delta = top2[:, 0] - top2[:, 1]  # (N,)
+            delta_norm = (delta - delta.min()) / (delta.max() - delta.min() + 1e-12)
+            u_vs.append(delta_norm)
 
-        u_i = torch.stack(u_vs, dim=1).max(dim=1).values
-        r = torch.clamp(1.0 - u_i, 0.2, 1.0)
-        rij = r.view(-1, 1) * r.view(1, -1)
+        u_i = torch.stack(u_vs, dim=1)  # (N, V)
+        u_weights = 1.0 - u_i  # 不确定度越小，权重越大
 
-        # 3) 计算对称 pairwise 一致性：conf(i) * conf(j) * 1[y_i=y_j]
-        s_view = (conf_v.unsqueeze(2) * conf_v.unsqueeze(1) * same.unsqueeze(0)).mean(dim=0)
-        s_cons = conf_c.view(-1, 1) * conf_c.view(1, -1) * same
+        # 3) 计算视图一致性分数矩阵 p_v (V, N, N)
+        p_v = conf_v.unsqueeze(2) * (batch_psedo_label.view(-1, 1) == batch_psedo_label.view(1, -1)).to(
+            device)  # (V, N, N)
+        p_view_max = p_v.max(dim=0).values  # (N, N)
 
-        # 4) 最终一致性 S：视图/共识对称融合 + 可靠性对称加权
-        S = 0.5 * (s_view + s_cons) * rij * same
-        S = S.masked_fill(torch.eye(N, device=device, dtype=torch.bool), 0.0)
+        # 4) 计算共识空间的一致性分数
+        p_c = conf_c.view(-1, 1) * (batch_psedo_label.view(-1, 1) == batch_psedo_label.view(1, -1)).to(device)  # (N, N)
+
+        # 5) 基于不确定度的权重加权视图一致性
+        # 扩展 u_weights 为 (N, N) 使其与 p_view_max 兼容
+        u_weights_expanded = u_weights.mean(dim=1)  # (N, V) -> (N,) 通过对视图维度求平均
+
+        # 加权后的视图一致性分数
+        weighted_p_view_max = p_view_max * u_weights_expanded  # (N, N)
+
+        # 6) 计算最终一致性分数 S_ij
+        S = torch.min(weighted_p_view_max, p_c)  # (N, N)
         return S
+

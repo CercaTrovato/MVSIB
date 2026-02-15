@@ -151,8 +151,14 @@ class Network(nn.Module):
             'n_clusters': self.num_clusters,
             'verbose': False
         }
+        if not torch.isfinite(features).all():
+            print("[WARN] clustering skipped due to NaN/Inf features; fallback pseudo labels used")
+            return (torch.arange(features.size(0), device=features.device) % self.num_clusters).long()
         clustering_model = torch_clustering.PyTorchKMeans(init='k-means++', max_iter=300, tol=1e-4, **kwargs)
         psedo_labels = clustering_model.fit_predict(features.to(dtype=torch.float64))
+        if psedo_labels is None:
+            print("[WARN] clustering returned None; fallback pseudo labels used")
+            return (torch.arange(features.size(0), device=features.device) % self.num_clusters).long()
 
         return psedo_labels
 
@@ -182,9 +188,11 @@ class Network(nn.Module):
                 # fit_predict 不会记录计算图；若输入异常则跳过本次中心更新以保证训练可继续。
                 z64 = z.to(dtype=torch.float64)
                 if not torch.isfinite(z64).all():
+                    print(f"[WARN] skip center update view={v} due to NaN/Inf")
                     continue
                 labels = km.fit_predict(z64)
                 if labels is None:
+                    print(f"[WARN] skip center update view={v} because kmeans labels are None")
                     continue
                 labels = labels.to(self.device).long()
                 centers = km.cluster_centers_.to(dtype=z.dtype).to(self.device)  # (L, d)

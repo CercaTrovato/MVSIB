@@ -55,10 +55,20 @@ parser.add_argument('--route_uncertain_only', default=True, type=lambda x: x.low
                     help='Apply pair-wise routing only for uncertain anchors.')
 parser.add_argument('--fn_route_warmup_epochs', default=15, type=int,
                     help='Warmup epochs before enabling FN-risk routing; use full contrastive negatives before this stage.')
-parser.add_argument('--feature_base_weight', default=1.0, type=float,
-                    help='Weight for baseline feature InfoNCE on all anchors.')
-parser.add_argument('--feature_route_weight', default=1.0, type=float,
-                    help='Weight for routed feature InfoNCE with FN-risk negative weights.')
+parser.add_argument('--uncert_top_p_start', default=0.30, type=float,
+                    help='Start top-p ratio for uncertainty curriculum.')
+parser.add_argument('--uncert_top_p_end', default=0.05, type=float,
+                    help='End top-p ratio for uncertainty curriculum.')
+parser.add_argument('--uncert_decay_epochs', default=20, type=int,
+                    help='Epochs for linear uncertainty top-p decay.')
+parser.add_argument('--fn_prob_tau', default=1.0, type=float,
+                    help='Temperature for quantile-based FN probability mapping.')
+parser.add_argument('--tail_s_cap', default=0.90, type=float,
+                    help='Similarity cap for hard-tail suppression.')
+parser.add_argument('--tail_beta', default=20.0, type=float,
+                    help='Strength for hard-tail suppression.')
+parser.add_argument('--route_uncertain_only_train_applied', default=False, type=lambda x: x.lower()=='true',
+                    help='Whether uncertain-only gating is truly applied to training weights (otherwise stat-only).')
 parser.add_argument('--log_dist_interval', default=5, type=int,
                     help='Epoch interval for DISTR summary and debug dump.')
 parser.add_argument('--save_debug_npz', default=True, type=lambda x: x.lower()=='true',
@@ -272,8 +282,13 @@ if __name__ == "__main__":
                 knn_neg_k=args.knn_neg_k,
                 route_uncertain_only=args.route_uncertain_only,
                 fn_route_warmup_epochs=args.fn_route_warmup_epochs,
-                feature_base_weight=args.feature_base_weight,
-                feature_route_weight=args.feature_route_weight,
+                initial_top_p=args.uncert_top_p_start,
+                p_min=args.uncert_top_p_end,
+                uncert_decay_epochs=args.uncert_decay_epochs,
+                fn_prob_tau=args.fn_prob_tau,
+                tail_s_cap=args.tail_s_cap,
+                tail_beta=args.tail_beta,
+                route_uncertain_only_train_applied=args.route_uncertain_only_train_applied,
                 y_prev_labels=y_prev,
             )
 
@@ -303,15 +318,15 @@ if __name__ == "__main__":
             sim_neg_p99_route = float(np.quantile(sim_neg_vals, 0.99)) if sim_neg_vals.size > 0 else 0.0
             corr_u_fn_route = _rget(R, 'corr_u_fn', _rget(R, 'corr_u_fn_ratio', 0.0))
             route_line = (
-                f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only(stat_only)={int(args.route_uncertain_only)} "
-                f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} sigma_s={_rget(R, 'sigma_s', 0.05):.3f} w_min={_rget(R, 'w_min', 0.1):.2f} p_fn_thr={_rget(R, 'p_fn_thr', 0.5):.2f} "
+                f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only_arg={int(args.route_uncertain_only)} route_uncertain_only_train_applied={int(_rget(R, 'route_uncertain_only_train_applied', 0.0))} "
+                f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} fn_alpha_q={_rget(R, 'fn_alpha_q', args.alpha_fn):.3f} fn_prob_tau={_rget(R, 'fn_prob_tau', args.fn_prob_tau):.3f} tail_s_cap={_rget(R, 'tail_s_cap', args.tail_s_cap):.3f} tail_beta={_rget(R, 'tail_beta', args.tail_beta):.1f} w_min={_rget(R, 'w_min', 0.1):.2f} p_fn_thr={_rget(R, 'p_fn_thr', 0.5):.2f} "
                 f"hn_mode=disabled FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
                 f"HN_ratio={_rget(R, 'hn_ratio', 0.0):.4f} FN_count={_rget(R, 'FN_count', 0.0):.0f} HN_count={_rget(R, 'HN_count', 0.0):.0f} neg_count={_rget(R, 'neg_count', 0.0):.0f} safe_neg_count={_rget(R, 'safe_neg_count', 0.0):.0f} "
                 f"mean_s_post_FN={_rget(R, 'mean_s_post_fn', 0.0):.4f} mean_s_post_nonFN={_rget(R, 'mean_s_post_non_fn', 0.0):.4f} "
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
-                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} assignment_stability={_rget(R, 'assignment_stability', 0.0):.4f} tau_fn_p50={_rget(R, 'tau_fn_p50', 0.0):.4f} tau_hn_p50={_rget(R, 'tau_hn_p50', 0.0):.4f} corr_u_fn={corr_u_fn_route:.4f} sim_neg_p99={sim_neg_p99_route:.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} routed_stat_neg_size={_rget(R, 'routed_stat_neg_size', _rget(R, 'routed_candidate_neg_size', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
+                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} assignment_stability={_rget(R, 'assignment_stability', 0.0):.4f} tau_fn_p50={_rget(R, 'tau_fn_p50', 0.0):.4f} tau_hn_p50={_rget(R, 'tau_hn_p50', 0.0):.4f} corr_u_fn={corr_u_fn_route:.4f} sim_neg_p99={sim_neg_p99_route:.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} routed_stat_neg_size={_rget(R, 'routed_stat_neg_size', _rget(R, 'routed_candidate_neg_size', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} p_unc={_rget(R, 'top_p_e', 0.0):.3f} u_thr={_rget(R, 'u_thr', 0.0):.4f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
             )
             logger.info(metric_line)
             logger.info(route_line)
@@ -421,8 +436,13 @@ if __name__ == "__main__":
                 knn_neg_k=args.knn_neg_k,
                 route_uncertain_only=args.route_uncertain_only,
                 fn_route_warmup_epochs=args.fn_route_warmup_epochs,
-                feature_base_weight=args.feature_base_weight,
-                feature_route_weight=args.feature_route_weight,
+                initial_top_p=args.uncert_top_p_start,
+                p_min=args.uncert_top_p_end,
+                uncert_decay_epochs=args.uncert_decay_epochs,
+                fn_prob_tau=args.fn_prob_tau,
+                tail_s_cap=args.tail_s_cap,
+                tail_beta=args.tail_beta,
+                route_uncertain_only_train_applied=args.route_uncertain_only_train_applied,
                 y_prev_labels=y_prev,
             )
 
@@ -449,15 +469,15 @@ if __name__ == "__main__":
             sim_neg_p99_route = float(np.quantile(sim_neg_vals, 0.99)) if sim_neg_vals.size > 0 else 0.0
             corr_u_fn_route = _rget(R, 'corr_u_fn', _rget(R, 'corr_u_fn_ratio', 0.0))
             route_line = (
-                f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only(stat_only)={int(args.route_uncertain_only)} "
-                f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} sigma_s={_rget(R, 'sigma_s', 0.05):.3f} w_min={_rget(R, 'w_min', 0.1):.2f} p_fn_thr={_rget(R, 'p_fn_thr', 0.5):.2f} "
+                f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only_arg={int(args.route_uncertain_only)} route_uncertain_only_train_applied={int(_rget(R, 'route_uncertain_only_train_applied', 0.0))} "
+                f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} fn_alpha_q={_rget(R, 'fn_alpha_q', args.alpha_fn):.3f} fn_prob_tau={_rget(R, 'fn_prob_tau', args.fn_prob_tau):.3f} tail_s_cap={_rget(R, 'tail_s_cap', args.tail_s_cap):.3f} tail_beta={_rget(R, 'tail_beta', args.tail_beta):.1f} w_min={_rget(R, 'w_min', 0.1):.2f} p_fn_thr={_rget(R, 'p_fn_thr', 0.5):.2f} "
                 f"hn_mode=disabled FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
                 f"HN_ratio={_rget(R, 'hn_ratio', 0.0):.4f} FN_count={_rget(R, 'FN_count', 0.0):.0f} HN_count={_rget(R, 'HN_count', 0.0):.0f} neg_count={_rget(R, 'neg_count', 0.0):.0f} safe_neg_count={_rget(R, 'safe_neg_count', 0.0):.0f} "
                 f"mean_s_post_FN={_rget(R, 'mean_s_post_fn', 0.0):.4f} mean_s_post_nonFN={_rget(R, 'mean_s_post_non_fn', 0.0):.4f} "
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
-                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} assignment_stability={_rget(R, 'assignment_stability', 0.0):.4f} tau_fn_p50={_rget(R, 'tau_fn_p50', 0.0):.4f} tau_hn_p50={_rget(R, 'tau_hn_p50', 0.0):.4f} corr_u_fn={corr_u_fn_route:.4f} sim_neg_p99={sim_neg_p99_route:.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} routed_stat_neg_size={_rget(R, 'routed_stat_neg_size', _rget(R, 'routed_candidate_neg_size', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
+                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} assignment_stability={_rget(R, 'assignment_stability', 0.0):.4f} tau_fn_p50={_rget(R, 'tau_fn_p50', 0.0):.4f} tau_hn_p50={_rget(R, 'tau_hn_p50', 0.0):.4f} corr_u_fn={corr_u_fn_route:.4f} sim_neg_p99={sim_neg_p99_route:.4f} candidate_neg_size={_rget(R, 'candidate_neg_size', _rget(R, 'neg_count', 0.0)):.0f} routed_stat_neg_size={_rget(R, 'routed_stat_neg_size', _rget(R, 'routed_candidate_neg_size', 0.0)):.0f} neg_after_filter_size={_rget(R, 'neg_after_filter_size', _rget(R, 'neg_count', 0.0)):.0f} neg_used_in_loss_size={_rget(R, 'neg_used_in_loss_size', _rget(R, 'neg_count', 0.0)):.0f} p_unc={_rget(R, 'top_p_e', 0.0):.3f} u_thr={_rget(R, 'u_thr', 0.0):.4f} route_count_inconsistent={int(_rget(R, 'route_count_inconsistent', 0))}"
             )
             logger.info(metric_line)
             logger.info(route_line)

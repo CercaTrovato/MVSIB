@@ -63,7 +63,7 @@ parser.add_argument('--uncert_decay_epochs', default=20, type=int,
                     help='Epochs for linear uncertainty top-p decay.')
 parser.add_argument('--fn_prob_tau', default=1.0, type=float,
                     help='Temperature for quantile-based FN probability mapping.')
-parser.add_argument('--uncert_kappa_init_q', default=0.8, type=float,
+parser.add_argument('--uncert_kappa_init_q', default=0.2, type=float,
                     help='Initialize kappa once at epoch1 as quantile(delta, q).')
 parser.add_argument('--sigma_u', default=0.1, type=float,
                     help='Scale in u=sigmoid((kappa-delta)/sigma_u).')

@@ -121,28 +121,45 @@ class Network(nn.Module):
         return common_z
 
 # 1.4 簇中心计算（compute_centers）对应论文 Eq.(6)-(7)
-    def compute_centers(self, x, psedo_labels):
+    def compute_centers(self, x, psedo_labels, eps=1e-12):
         """
-        严格复刻原版权重矩阵 @ x 的写法，100% 等价于 F.normalize(one_hot,1)@x
+        安全版本：允许空簇，不产生 NaN。
+        - centers = mean(x in cluster)
+        - 空簇：优先回填上一次共识中心；否则用随机单位向量
         """
         device = x.device
         ps = psedo_labels.to(device)
         N, d = x.shape
         L = self.num_clusters
 
-        # —— 1) 构造 one-hot 矩阵 (L, N) ——
+        # one-hot (L,N)
         weight = torch.zeros(L, N, device=device)
         weight[ps, torch.arange(N, device=device)] = 1.0
 
-        # —— 2) L1 归一化每行 ——
-        weight = F.normalize(weight, p=1, dim=1)  # 保证每行加和=1
+        row_sum = weight.sum(dim=1, keepdim=True)  # (L,1)
+        non_empty = (row_sum.squeeze(1) > 0)  # (L,)
 
-        # —— 3) centers = weight @ x ——
-        centers = weight @ x  # (L, d)
+        # safe row-normalize
+        weight = weight / row_sum.clamp_min(eps)
+        centers = weight @ x  # (L,d)
 
-        # —— 4) L2 归一化每个中心 ——
+        # fill empty clusters
+        if not torch.all(non_empty):
+            prev = None
+            if isinstance(self.centers, list) and self.centers[self.num_views] is not None:
+                prev = self.centers[self.num_views].to(device)
+                if not torch.isfinite(prev).all():
+                    prev = None
+
+            rand = torch.randn(L, d, device=device)
+            rand = F.normalize(rand, p=2, dim=1)
+
+            if prev is not None:
+                centers[~non_empty] = prev[~non_empty]
+            else:
+                centers[~non_empty] = rand[~non_empty]
+
         centers = F.normalize(centers, p=2, dim=1)
-
         return centers
 
     def clustering(self, features):

@@ -97,7 +97,8 @@ class Loss(nn.Module):
         positive_loss = -positive_term  # 保持原来 “-sum(...)”
 
         # —— 5) negative loss ——
-        neg_mask = (~w_mask) & (y_pse == 0)
+        # negatives 仅由伪标签异簇决定；w_mask 只用于 positives，避免路由统计与loss分母不一致。
+        neg_mask = (~eye) & (y_pse == 0)
         NEG_INF = torch.tensor(float('-inf'), device=device)
 
         neg_weight_mat = torch.ones_like(y_pse, device=device)

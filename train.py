@@ -295,7 +295,11 @@ if __name__ == "__main__":
             route_line = (
                 f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only={int(args.route_uncertain_only)} "
                 f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} route_s0={args.route_s0:.4f} route_t_fn={args.route_t_fn:.4f} "
+<<<<<<< codex/clarify-module-b-code-dependencies
                 f"w_min={args.w_min:.4f} w_max={args.w_max:.4f} route_hn_temp={args.route_hn_temp:.4f} lambda_h={args.route_lambda_h:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
+=======
+                f"w_min={args.w_min:.4f} route_hn_temp={args.route_hn_temp:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
+>>>>>>> main
                 f"HN_ratio={_rget(R, 'hn_ratio', 0.0):.4f} FN_count={_rget(R, 'FN_count', 0.0):.0f} HN_count={_rget(R, 'HN_count', 0.0):.0f} neg_count={_rget(R, 'neg_count', 0.0):.0f} safe_neg_count={_rget(R, 'safe_neg_count', 0.0):.0f} "
                 f"mean_s_post_FN={_rget(R, 'mean_s_post_fn', 0.0):.4f} mean_s_post_nonFN={_rget(R, 'mean_s_post_non_fn', 0.0):.4f} "
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
@@ -409,11 +413,17 @@ if __name__ == "__main__":
                 temperature_f=args.temperature_f,
                 cross_warmup_epochs=args.cross_warmup_epochs,
                 w_min=args.w_min,
+<<<<<<< codex/clarify-module-b-code-dependencies
                 w_max=args.w_max,
                 route_s0=args.route_s0,
                 route_t_fn=args.route_t_fn,
                 route_hn_temp=args.route_hn_temp,
                 route_lambda_h=args.route_lambda_h,
+=======
+                route_s0=args.route_s0,
+                route_t_fn=args.route_t_fn,
+                route_hn_temp=args.route_hn_temp,
+>>>>>>> main
                 gate_s0=args.gate_s0,
                 gate_tg=args.gate_tg,
                 gate_ema_rho=args.gate_ema_rho,
@@ -457,7 +467,11 @@ if __name__ == "__main__":
             route_line = (
                 f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only={int(args.route_uncertain_only)} "
                 f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} route_s0={args.route_s0:.4f} route_t_fn={args.route_t_fn:.4f} "
+<<<<<<< codex/clarify-module-b-code-dependencies
                 f"w_min={args.w_min:.4f} w_max={args.w_max:.4f} route_hn_temp={args.route_hn_temp:.4f} lambda_h={args.route_lambda_h:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
+=======
+                f"w_min={args.w_min:.4f} route_hn_temp={args.route_hn_temp:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
+>>>>>>> main
                 f"HN_ratio={_rget(R, 'hn_ratio', 0.0):.4f} FN_count={_rget(R, 'FN_count', 0.0):.0f} HN_count={_rget(R, 'HN_count', 0.0):.0f} neg_count={_rget(R, 'neg_count', 0.0):.0f} safe_neg_count={_rget(R, 'safe_neg_count', 0.0):.0f} "
                 f"mean_s_post_FN={_rget(R, 'mean_s_post_fn', 0.0):.4f} mean_s_post_nonFN={_rget(R, 'mean_s_post_non_fn', 0.0):.4f} "
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "

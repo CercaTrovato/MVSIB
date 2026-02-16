@@ -89,6 +89,13 @@ def pre_train(model, mv_data, batch_size, epochs, optimizer):
 def _adaptive_u_threshold(u, method='otsu', bins=64, eps=1e-12):
     """模块A：由当下 u 分布自适应估计 tau_u（当前实现：Otsu）。"""
     u = u.detach().reshape(-1)
+    # 数值安全：过滤 NaN/Inf，避免 torch.histc 在非有限区间报错
+    finite_mask = torch.isfinite(u)
+    if finite_mask.any():
+        u = u[finite_mask]
+    else:
+        return 0.5
+
     if u.numel() <= 1:
         return float(u.mean().item()) if u.numel() > 0 else 0.5
 
@@ -111,6 +118,25 @@ def _adaptive_u_threshold(u, method='otsu', bins=64, eps=1e-12):
     sigma_b[~torch.isfinite(sigma_b)] = -1.0
     idx = int(torch.argmax(sigma_b).item())
     return float(centers[idx].item())
+
+
+def _sanitize_uncertainty_outputs(u, u_hat, u_aux):
+    """数值防护：将不确定度相关张量中的 NaN/Inf 回填到有限值域。"""
+    u = torch.nan_to_num(u, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+    u_hat = torch.nan_to_num(u_hat, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+    u_aux = dict(u_aux)
+    u_aux['gamma'] = torch.nan_to_num(u_aux['gamma'], nan=0.0, posinf=20.0, neginf=-20.0)
+    u_aux['d_view'] = torch.nan_to_num(u_aux['d_view'], nan=0.0, posinf=10.0, neginf=0.0).clamp(min=0.0)
+    u_aux['d_time'] = torch.nan_to_num(u_aux['d_time'], nan=0.0, posinf=10.0, neginf=0.0).clamp(min=0.0)
+    u_aux['q_cons'] = torch.nan_to_num(u_aux['q_cons'], nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+    return u, u_hat, u_aux
+
+
+def _sanitize_latent_outputs(zs, common_z):
+    """数值防护：清理编码器输出，避免 NaN/Inf 进入后续损失与中心更新。"""
+    zs_safe = [torch.nan_to_num(z, nan=0.0, posinf=1.0, neginf=-1.0) for z in zs]
+    common_z_safe = torch.nan_to_num(common_z, nan=0.0, posinf=1.0, neginf=-1.0)
+    return zs_safe, common_z_safe
 
 
 def _compute_theta_certificate(common_z, q_cons, temperature=0.5, eps=1e-12):
@@ -143,14 +169,15 @@ def _bounded_uncertain_mask(u, raw_mask, min_ratio=0.02, max_ratio=0.6):
     return raw_mask, k_unc
 
 
-def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, prev_labels_batch,
-                            gate_val, alpha_fn=0.1, pi_fn=0.1, w_min=0.05,
-                            hn_beta=0.1, neg_mode='batch', knn_k=20,
+def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, gamma, d_time,
+                            gate_val, route_s0=0.3, route_t_fn=0.5,
+                            route_th=0.2, route_hn_temp=0.2, w_min=0.05,
+                            neg_mode='batch', knn_k=20,
                             uncertain_mask=None, eps=1e-12):
     """
-    Design 1': pair-wise FN risk routing.
-    - 对 negative pair (i,j) 估计 FN 风险并在 InfoNCE 分母软降权
-    - 在可信 negatives 中按分位数选择 hard negatives（eta 矩阵）
+    模块B（pair层）: 用连续 FN-risk 概率去污染分母，并独立构造 HN 难度质量。
+    - r_fn(i,j) 越大, 表示“负对被 FN 污染”的概率越高，w_neg 越小
+    - hn_score(i,j) 只用于 HN margin，不用于放大 InfoNCE 分母权重
     """
     device = common_z.device
     N = common_z.size(0)
@@ -166,20 +193,19 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
         knn_mask[row_idx, knn_idx] = True
         neg_mask = knn_mask & (~eye)
 
-    # (E1) posterior same-cluster evidence
+    # (E1) 同簇后验证据 p_ij = <q_i, q_j>
     s_post = torch.mm(memberships_cons, memberships_cons.t()).clamp(0.0, 1.0)
 
-    # (E2) stability evidence
-    if prev_labels_batch is None:
-        s_stab = torch.zeros(N, N, device=device)
-    else:
-        stab_vec = (batch_labels == prev_labels_batch).float()
-        s_stab = torch.ger(stab_vec, stab_vec)
+    # (E2) 无记忆稳定证据 + 时间稳定证据（对应模块B冷启动安全门控）
+    gamma_stab = torch.sigmoid(gamma)
+    time_stab = torch.exp(-d_time.clamp(min=0.0))
+    stab_vec = (gamma_stab * time_stab).clamp(0.0, 1.0)
+    s_stab = torch.ger(stab_vec, stab_vec)
 
-    # (E3) reliability from uncertainty
+    # (E3) uncertainty 可靠性门，防止 u_hat 高时过度依赖 pair 证据
     r = (1.0 - 0.5 * (u_hat.unsqueeze(1) + u_hat.unsqueeze(0))).clamp(0.0, 1.0)
 
-    # (E4) neighborhood overlap evidence，按 gate 渐进启用
+    # (E4) neighborhood overlap evidence
     if N > 1:
         k_nb = min(knn_k + 1, N)
         dist = torch.cdist(common_z, common_z, p=2)
@@ -197,56 +223,33 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
         x = x.clamp(min=eps, max=1.0 - eps)
         return torch.log(x / (1.0 - x))
 
-    S = r * s_stab * _logit(s_post) + gate_val * r * _logit(s_nbr + eps)
-    S = S.masked_fill(~neg_mask, float('-inf'))
+    # (E5) 连续 FN-risk: logit(p_ij) + 稳定证据 + 邻域证据
+    S = r * (_logit(s_post) + _logit(s_stab + eps) + gate_val * _logit(s_nbr + eps))
+    r_fn = torch.sigmoid(S / max(route_t_fn, eps)).masked_fill(~neg_mask, 0.0)
 
-    # per-anchor quantile threshold for FN-risk pairs
-    rho = torch.zeros(N, N, dtype=torch.bool, device=device)
-    w_neg = torch.ones(N, N, device=device)
-    fn_ratio_list = []
-    fn_ratio_per_anchor = torch.zeros(N, device=device)
-    tau_fn_per_anchor = torch.full((N,), float('nan'), device=device)
-    fn_count_per_anchor = torch.zeros(N, device=device)
-    for i in range(N):
-        idx = neg_mask[i].nonzero(as_tuple=True)[0]
-        if idx.numel() == 0:
-            continue
-        s_i = S[i, idx]
-        tau_i = torch.quantile(s_i, max(0.0, min(1.0, 1.0 - alpha_fn)))
-        tau_fn_per_anchor[i] = tau_i
-        rho_i = s_i >= tau_i
-        if uncertain_mask is not None and (not bool(uncertain_mask[i])):
-            rho_i = torch.zeros_like(rho_i)
-        rho[i, idx] = rho_i
-        w_neg[i, idx[rho_i]] = max(gate_val * pi_fn, w_min)
-        fn_count_i = rho_i.float().sum()
-        fn_count_per_anchor[i] = fn_count_i
-        fn_ratio_i = rho_i.float().mean()
-        fn_ratio_list.append(fn_ratio_i)
-        fn_ratio_per_anchor[i] = fn_ratio_i
+    # uncertain-only 路由: 只在 U_t 内启用强去污染
+    if uncertain_mask is not None:
+        anc = uncertain_mask.float().unsqueeze(1)
+        r_fn = r_fn * anc
 
-    # HN from safe negatives by similarity quantile
+    # 模块B去污染权重: 仅随 FN-risk 降权（不做 HN 上权）
+    w_neg = (1.0 - gate_val * r_fn).clamp(min=w_min, max=1.0)
+    w_neg = w_neg.masked_fill(~neg_mask, 0.0)
+
+    # HN 难度质量: 高相似且低 FN-risk，用于后续 margin 惩罚
     sim = F.cosine_similarity(common_z.unsqueeze(1), common_z.unsqueeze(0), dim=2)
-    eta = torch.zeros(N, N, dtype=torch.bool, device=device)
-    hn_ratio_list = []
-    tau_hn_per_anchor = torch.full((N,), float('nan'), device=device)
-    hn_count_per_anchor = torch.zeros(N, device=device)
-    for i in range(N):
-        safe_idx = (neg_mask[i] & (~rho[i])).nonzero(as_tuple=True)[0]
-        if safe_idx.numel() == 0:
-            continue
-        sim_i = sim[i, safe_idx]
-        tau_hn_i = torch.quantile(sim_i, max(0.0, min(1.0, 1.0 - hn_beta)))
-        tau_hn_per_anchor[i] = tau_hn_i
-        eta_i = sim_i >= tau_hn_i
-        if uncertain_mask is not None and (not bool(uncertain_mask[i])):
-            eta_i = torch.zeros_like(eta_i)
-        eta[i, safe_idx] = eta_i
-        hn_count_per_anchor[i] = eta_i.float().sum()
-        hn_ratio_list.append(eta_i.float().mean())
+    hn_score = torch.sigmoid((sim - route_th) / max(route_hn_temp, eps)) * (1.0 - r_fn)
+    hn_score = hn_score.masked_fill(~neg_mask, 0.0)
+
+    fn_mass_i = (r_fn * neg_mask.float()).sum(dim=1) / (neg_mask.float().sum(dim=1) + eps)
+    hn_mass_i = (hn_score * neg_mask.float()).sum(dim=1) / (neg_mask.float().sum(dim=1) + eps)
+    rho = r_fn > 0.5
+    eta = hn_score > 0.5
+    fn_count_per_anchor = rho.float().sum(dim=1)
+    hn_count_per_anchor = eta.float().sum(dim=1)
 
     u_center = u_hat - u_hat.mean()
-    fn_center = fn_ratio_per_anchor - fn_ratio_per_anchor.mean()
+    fn_center = fn_mass_i - fn_mass_i.mean()
     denom = (u_center.norm() * fn_center.norm() + eps)
     corr_u_fn = (u_center * fn_center).sum() / denom
 
@@ -259,7 +262,7 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
 
     exp_sim = torch.exp(sim)
     denom_all = (w_neg * exp_sim * neg_mask.float()).sum() + eps
-    denom_fn = (w_neg * exp_sim * rho.float()).sum()
+    denom_fn = (w_neg * exp_sim * r_fn).sum()
     denom_fn_share = (denom_fn / denom_all).item()
 
     fn_mask = neg_mask & rho
@@ -270,9 +273,9 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
     safe_neg_count = safe_mask.float().sum().item()
 
     stats = {
-        'fn_ratio': torch.stack(fn_ratio_list).mean().item() if fn_ratio_list else 0.0,
+        'fn_ratio': fn_mass_i.mean().item(),
         'safe_ratio': ((safe_mask.float().sum() / (neg_mask.float().sum() + eps))).item(),
-        'hn_ratio': torch.stack(hn_ratio_list).mean().item() if hn_ratio_list else 0.0,
+        'hn_ratio': hn_mass_i.mean().item(),
         'FN_count': fn_count,
         'HN_count': hn_count,
         'neg_count': neg_count,
@@ -285,8 +288,8 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
         'mean_sim_hn': mean_sim_hn,
         'mean_sim_safe_non_hn': mean_sim_safe_non_hn,
         'delta_sim': mean_sim_hn - mean_sim_safe_non_hn,
-        'label_flip': (1.0 - s_stab.diag().mean().item()) if prev_labels_batch is not None else 0.0,
-        'stab_rate': s_stab.diag().mean().item() if prev_labels_batch is not None else 0.0,
+        'label_flip': (1.0 - stab_vec.mean().item()),
+        'stab_rate': stab_vec.mean().item(),
         'denom_fn_share': denom_fn_share,
         'denom_safe_share': 1.0 - denom_fn_share,
         'w_hit_min_ratio': ((w_neg <= (w_min + eps)) & rho).float().mean().item() if rho.any() else 0.0,
@@ -296,14 +299,87 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
         'U_size': int(uncertain_mask.sum().item()) if uncertain_mask is not None else int(N),
         'fn_pair_share': (fn_count / max(neg_count, 1.0)),
         'hn_pair_share': (hn_count / max(safe_neg_count, 1.0)),
+        'r_fn_mean': r_fn[neg_mask].mean().item() if neg_mask.any() else 0.0,
+        'w_neg_mean': w_neg[neg_mask].mean().item() if neg_mask.any() else 0.0,
+        'w_neg_p90': torch.quantile(w_neg[neg_mask], 0.9).item() if neg_mask.any() else 0.0,
+        'fn_mass_i_mean': fn_mass_i.mean().item(),
+        'hn_mass_i_mean': hn_mass_i.mean().item(),
+        'fn_mass_i_p90': torch.quantile(fn_mass_i, 0.9).item(),
+        'hn_mass_i_p90': torch.quantile(hn_mass_i, 0.9).item(),
     }
     aux = {
         'S': S, 's_post': s_post, 'sim': sim, 'rho': rho, 'eta': eta, 'w_neg': w_neg,
+        'r_fn': r_fn, 'hn_score': hn_score, 'fn_mass_i': fn_mass_i, 'hn_mass_i': hn_mass_i,
         'r': r, 's_stab': s_stab, 'neg_mask': neg_mask,
-        'tau_fn_per_anchor': tau_fn_per_anchor, 'tau_hn_per_anchor': tau_hn_per_anchor,
+        'tau_fn_per_anchor': torch.full((N,), float('nan'), device=device),
+        'tau_hn_per_anchor': torch.full((N,), float('nan'), device=device),
         'FN_count_per_anchor': fn_count_per_anchor, 'HN_count_per_anchor': hn_count_per_anchor,
     }
     return w_neg, eta, rho, stats, aux
+
+
+def _compute_stability_gate(u_aux, gate_s0=0.5, gate_tg=0.2, gate_ema_prev=None, gate_ema_rho=0.9):
+    """模块B门控：用 margin 与时间稳定性的并联证据触发，避免仅靠 epoch 线性门控。"""
+    gamma = torch.nan_to_num(u_aux['gamma'].detach(), nan=0.0, posinf=20.0, neginf=-20.0)
+    d_time = torch.nan_to_num(u_aux['d_time'].detach(), nan=0.0, posinf=10.0, neginf=0.0).clamp(min=0.0)
+    stab_i = (torch.sigmoid(gamma) * torch.exp(-d_time)).clamp(0.0, 1.0)
+    stab_batch = float(stab_i.mean().item())
+    if gate_ema_prev is None:
+        gate_ema = stab_batch
+    else:
+        gate_ema = float(gate_ema_rho) * float(gate_ema_prev) + (1.0 - float(gate_ema_rho)) * stab_batch
+    gate_val = 1.0 / (1.0 + np.exp(-(gate_ema - gate_s0) / max(gate_tg, 1e-12)))
+    gate_val = float(max(0.0, min(1.0, gate_val)))
+    return gate_val, stab_i, gate_ema
+
+
+def _compute_anchor_route_losses(common_z, q_cons, ema_q_batch, uncertain_mask,
+                                 q_centers, route_aux,
+                                 bayes_lambda_p=0.7, bayes_lambda_l=1.0,
+                                 bayes_delta=0.2, mass_delta=0.05,
+                                 hn_margin=0.2):
+    """模块B anchor层：FN/HN/neutral 路由 + 定向损失（FN pull / HN margin）。"""
+    device = common_z.device
+    eps = 1e-12
+    N = common_z.size(0)
+    fn_loss = torch.tensor(0.0, device=device)
+    hn_loss = torch.tensor(0.0, device=device)
+    fn_type = torch.zeros(N, dtype=torch.bool, device=device)
+    hn_type = torch.zeros(N, dtype=torch.bool, device=device)
+    neutral_type = torch.ones(N, dtype=torch.bool, device=device)
+
+    if uncertain_mask.sum() == 0:
+        return fn_loss, hn_loss, fn_type, hn_type, neutral_type
+
+    q_tilde = (ema_q_batch.clamp(min=eps) ** bayes_lambda_p) * (q_cons.clamp(min=eps) ** bayes_lambda_l)
+    q_tilde = q_tilde / (q_tilde.sum(dim=1, keepdim=True) + eps)
+    top2_val, top2_idx = torch.topk(q_tilde, 2, dim=1)
+    B = torch.log((top2_val[:, 0] + eps) / (top2_val[:, 1] + eps))
+
+    fn_mass_i = route_aux['fn_mass_i']
+    hn_mass_i = route_aux['hn_mass_i']
+    low_conf = uncertain_mask & (B < bayes_delta)
+    fn_type = low_conf & (fn_mass_i > hn_mass_i + mass_delta)
+    hn_type = low_conf & (hn_mass_i > fn_mass_i + mass_delta)
+    neutral_type = ~(fn_type | hn_type)
+
+    if fn_type.any():
+        k1 = top2_idx[:, 0]
+        mu_k1 = q_centers[k1]
+        w_fn = (torch.sigmoid(B) * torch.minimum(torch.ones_like(B), B.abs()))
+        fn_loss = (w_fn[fn_type] * (1.0 - F.cosine_similarity(common_z[fn_type], mu_k1[fn_type], dim=1))).mean()
+
+    if hn_type.any():
+        k1 = top2_idx[:, 0]
+        k2 = top2_idx[:, 1]
+        mu_k1 = q_centers[k1]
+        mu_k2 = q_centers[k2]
+        w_hn = (torch.sigmoid(-B) * torch.minimum(torch.ones_like(B), B.abs()))
+        sim1 = F.cosine_similarity(common_z[hn_type], mu_k1[hn_type], dim=1)
+        sim2 = F.cosine_similarity(common_z[hn_type], mu_k2[hn_type], dim=1)
+        hn_loss = (w_hn[hn_type] * torch.relu(hn_margin + sim1 - sim2)).mean()
+
+    return fn_loss, hn_loss, fn_type, hn_type, neutral_type
 
 
 def contrastive_train(model, mv_data, mvc_loss,
@@ -315,10 +391,20 @@ def contrastive_train(model, mv_data, mvc_loss,
                       temperature_f, max_epoch=100,
                       initial_top_p=0.3,
                       cross_warmup_epochs=50,
-                      alpha_fn=0.1,
-                      pi_fn=0.1,
                       w_min=0.05,
-                      hn_beta=0.1,
+                      route_s0=0.3,
+                      route_t_fn=0.5,
+                      route_hn_temp=0.2,
+                      gate_s0=0.5,
+                      gate_tg=0.2,
+                      gate_ema_rho=0.9,
+                      bayes_lambda_p=0.7,
+                      bayes_lambda_l=1.0,
+                      bayes_delta=0.2,
+                      mass_delta=0.05,
+                      lambda_fn_pull=0.1,
+                      lambda_hn_margin=0.1,
+                      hn_margin=0.2,
                       neg_mode='batch',
                       knn_neg_k=20,
                       route_uncertain_only=True,
@@ -341,19 +427,20 @@ def contrastive_train(model, mv_data, mvc_loss,
 
     if not hasattr(model, 'tau_u_ema'):
         model.tau_u_ema = None
+    if not hasattr(model, 'gate_ema'):
+        model.gate_ema = None
+    if not hasattr(model, 'gate_ema'):
+        model.gate_ema = None
 
     # E 步：更新全量伪标签
     psedo_labeling(model, mv_data, batch_size)
 
-    # Push/Pull Lpen 超参
-    lambda_push = lambda_hn_penalty
-    lambda_pull = lambda_hn_penalty
-    margin = 0.2
-
     criterion = torch.nn.MSELoss()  # 添加重建损失的损失函数
 
     epoch_meter = {'L_total':0.0,'L_recon':0.0,'L_feat':0.0,'L_cross':0.0,'L_cluster':0.0,'L_uncert':0.0,'L_hn':0.0,'L_reg':0.0}
-    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'tau_u':0.0,'unsafe_ratio':0.0,'theta_p50_batch':0.0,'theta_p90_batch':0.0,'k_unc':0.0}
+    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'tau_u':0.0,'unsafe_ratio':0.0,'theta_p50_batch':0.0,'theta_p90_batch':0.0,'k_unc':0.0,
+                   'r_fn_mean':0.0,'w_neg_mean':0.0,'w_neg_p90':0.0,'fn_mass_i_mean':0.0,'hn_mass_i_mean':0.0,'fn_mass_i_p90':0.0,'hn_mass_i_p90':0.0,
+                   'fn_type_ratio':0.0,'hn_type_ratio':0.0,'neutral_ratio':0.0,'gate_stab':0.0,'L_fn_pull':0.0,'L_hn_margin':0.0}
     batch_count = 0
     last_dump = {}
 
@@ -365,6 +452,7 @@ def contrastive_train(model, mv_data, mvc_loss,
         # ——— 2) 编码 + 融合 ———
         xrs, zs = model(sub_data_views)
         common_z = model.fusion(zs)
+        zs, common_z = _sanitize_latent_outputs(zs, common_z)
 
         # 现在有了 common_z，确定 device
         device = common_z.device
@@ -383,6 +471,7 @@ def contrastive_train(model, mv_data, mvc_loss,
             update_ema=True,
             return_parts=True,
         )
+        u, u_hat, u_aux = _sanitize_uncertainty_outputs(u, u_hat, u_aux)
         batch_N  = u_hat.size(0)
 
         # ——— 4) 模块A自适应不确定划分：tau_u + 证书扩展 + 保底约束 ———
@@ -395,6 +484,7 @@ def contrastive_train(model, mv_data, mvc_loss,
 
         uncertain_mask = (u > tau_u)
         theta = _compute_theta_certificate(common_z, memberships[num_views], temperature=theta_temperature)
+        theta = torch.nan_to_num(theta, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
         unsafe_mask = (theta > theta_threshold) if enable_theta_certificate else torch.zeros_like(uncertain_mask)
         uncertain_mask = uncertain_mask | unsafe_mask
         uncertain_mask, k_unc = _bounded_uncertain_mask(
@@ -408,34 +498,40 @@ def contrastive_train(model, mv_data, mvc_loss,
 
         print(f"Batch {batch_idx}: uncertain {uncertain_mask.sum().item()}/{batch_N} = {uncertain_mask.sum().item()/batch_N:.2%}")
 
-        # ——— 5) 动态门控 Gate ———
+        # ——— 5) 模块B稳定性门控：由稳定证据触发，而非 epoch 线性 ——
+        gate_val, stab_i, model.gate_ema = _compute_stability_gate(
+            u_aux,
+            gate_s0=gate_s0,
+            gate_tg=gate_tg,
+            gate_ema_prev=model.gate_ema,
+            gate_ema_rho=gate_ema_rho,
+        )
         u_mean = u_hat.mean().item()
         mu_start, mu_end = 0.3, 0.7
         raw_gate = (u_mean - mu_start) / (mu_end - mu_start)
         gate_u = float(max(0.0, min(1.0, raw_gate)))
         t = float((epoch - 1) / max(1, max_epoch - 1))
-        gate_fn = t
-        gate_hn = t
-        gate_val = t
+        gate_fn = gate_val
+        gate_hn = gate_val
         gate = torch.tensor(gate_val, device=device)
 
         # ——— 6) 计算共识中心 q_centers ———
         q_centers = model.compute_centers(common_z, batch_psedo_label)
 
         # ——— 7) Design 1': pair-wise FN 风险路由（停用原 FN/HN MLP 路径）———
-        prev_batch = None if y_prev_labels is None else y_prev_labels[sample_idx].to(device)
         route_mask = uncertain_mask if route_uncertain_only else None
         w_neg, eta_mat, rho_mat, route_stats, route_aux = _build_pairwise_fn_risk(
             common_z=common_z,
             memberships_cons=memberships[num_views],
             u_hat=u_hat,
-            batch_labels=batch_psedo_label,
-            prev_labels_batch=prev_batch,
+            gamma=u_aux['gamma'],
+            d_time=u_aux['d_time'],
             gate_val=gate_val,
-            alpha_fn=alpha_fn,
-            pi_fn=pi_fn,
+            route_s0=route_s0,
+            route_t_fn=route_t_fn,
+            route_th=route_s0,
+            route_hn_temp=route_hn_temp,
             w_min=w_min,
-            hn_beta=hn_beta,
             neg_mode=neg_mode,
             knn_k=knn_neg_k,
             uncertain_mask=route_mask,
@@ -443,7 +539,25 @@ def contrastive_train(model, mv_data, mvc_loss,
 
         # ——— 8) 累加各项损失 ———
         loss_list = []
-        Lcl = Lfeat = Lu = Lpen = Lcross = Lrecon = 0.0  # 添加重建损失
+        Lcl = Lfeat = Lu = Lpen = Lcross = Lrecon = Lfnpull = Lhnmargin = 0.0
+
+        idx = sample_idx.to(device).long()
+        ema_q_batch = model.ema_q[idx]
+        fn_pull_loss, hn_margin_loss, fn_type, hn_type, neutral_type = _compute_anchor_route_losses(
+            common_z=common_z,
+            q_cons=memberships[num_views],
+            ema_q_batch=ema_q_batch,
+            uncertain_mask=uncertain_mask,
+            q_centers=q_centers,
+            route_aux=route_aux,
+            bayes_lambda_p=bayes_lambda_p,
+            bayes_lambda_l=bayes_lambda_l,
+            bayes_delta=bayes_delta,
+            mass_delta=mass_delta,
+            hn_margin=hn_margin,
+        )
+        Lfn = gate_fn * lambda_fn_pull * fn_pull_loss
+        Lhnm = gate_hn * lambda_hn_margin * hn_margin_loss
 
         for v in range(num_views):
             # 准备 Wv 和 y_pse
@@ -478,18 +592,12 @@ def contrastive_train(model, mv_data, mvc_loss,
             Lu += Lu_i.item()
             loss_list.append(Lu_i)
 
-            # d) Hard-Negative penalty from safe negatives (Design 1')
-            sim_mat = F.cosine_similarity(common_z.unsqueeze(1), common_z.unsqueeze(0), dim=2)
-            pos_sim = torch.diag(sim_mat)
-            eta_cnt = eta_mat.sum().float()
-            if eta_cnt > 0:
-                push_loss = torch.relu((sim_mat - pos_sim.unsqueeze(1) + margin) * eta_mat.float()).sum() / (eta_cnt + 1e-12)
-            else:
-                push_loss = torch.tensor(0.0, device=device)
-            pull_loss = (1.0 - pos_sim).mean()
-            Lpen_i = gate_hn * (lambda_push * push_loss + lambda_pull * pull_loss)
+            # d) 模块B anchor 定向损失（FN pull + HN margin）
+            Lpen_i = Lfn + Lhnm
 
             Lpen += Lpen_i.item()
+            Lfnpull += Lfn.item()
+            Lhnmargin += Lhnm.item()
             loss_list.append(Lpen_i)
 
             # e) 跨视图加权 InfoNCE
@@ -509,8 +617,12 @@ def contrastive_train(model, mv_data, mvc_loss,
 
         # ——— 9) 梯度更新 & 打印 ———
         total_loss = sum(loss_list)
+        if not torch.isfinite(total_loss):
+            print(f"[WARN] Skip batch {batch_idx} at epoch {epoch} due to non-finite total_loss={float(total_loss)}")
+            continue
         optimizer.zero_grad()
         total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
         optimizer.step()
 
         epoch_meter['L_total'] += total_loss.item()
@@ -537,6 +649,18 @@ def contrastive_train(model, mv_data, mvc_loss,
         route_stats['theta_p50_batch'] = float(torch.quantile(theta.detach(), 0.5).item())
         route_stats['theta_p90_batch'] = float(torch.quantile(theta.detach(), 0.9).item())
         route_stats['k_unc'] = k_unc
+        route_stats['fn_type_ratio'] = float(fn_type.float().mean().item())
+        route_stats['hn_type_ratio'] = float(hn_type.float().mean().item())
+        route_stats['neutral_ratio'] = float(neutral_type.float().mean().item())
+        route_stats['gate_stab'] = float(stab_i.mean().item())
+        route_stats['L_fn_pull'] = Lfn.item()
+        route_stats['L_hn_margin'] = Lhnm.item()
+        route_stats['fn_type_ratio'] = float(fn_type.float().mean().item())
+        route_stats['hn_type_ratio'] = float(hn_type.float().mean().item())
+        route_stats['neutral_ratio'] = float(neutral_type.float().mean().item())
+        route_stats['gate_stab'] = float(stab_i.mean().item())
+        route_stats['L_fn_pull'] = Lfnpull
+        route_stats['L_hn_margin'] = Lhnmargin
 
         last_dump = {
             'u_sample': u.detach().cpu(),
@@ -546,8 +670,8 @@ def contrastive_train(model, mv_data, mvc_loss,
             'm_top1_sample': top2_m[:, 0].detach().cpu(),
             'm_gap_sample': (top2_m[:, 0] - top2_m[:, 1]).detach().cpu(),
             'y_curr_sample': batch_psedo_label.detach().cpu(),
-            'y_prev_sample': (prev_batch.detach().cpu() if prev_batch is not None else torch.full_like(batch_psedo_label.detach().cpu(), -1)),
-            'flip_mask_sample': ((batch_psedo_label != prev_batch).float().detach().cpu() if prev_batch is not None else torch.zeros_like(batch_psedo_label, dtype=torch.float32).detach().cpu()),
+            'y_prev_sample': torch.full_like(batch_psedo_label.detach().cpu(), -1),
+            'flip_mask_sample': torch.zeros_like(batch_psedo_label, dtype=torch.float32).detach().cpu(),
             'S_pair_sample': route_aux['S'][route_aux['neg_mask']].detach().cpu(),
             'w_pair_sample': route_aux['w_neg'][route_aux['neg_mask']].detach().cpu(),
             's_post_pair_sample': route_aux['s_post'][route_aux['neg_mask']].detach().cpu(),
@@ -556,6 +680,10 @@ def contrastive_train(model, mv_data, mvc_loss,
             'eta_hn_pair_sample': route_aux['eta'][route_aux['neg_mask']].float().detach().cpu(),
             'r_pair_sample': route_aux['r'][route_aux['neg_mask']].detach().cpu(),
             's_stab_pair_sample': route_aux['s_stab'][route_aux['neg_mask']].detach().cpu(),
+            'r_fn_pair_sample': route_aux['r_fn'][route_aux['neg_mask']].detach().cpu(),
+            'hn_score_pair_sample': route_aux['hn_score'][route_aux['neg_mask']].detach().cpu(),
+            'fn_mass_i_sample': route_aux['fn_mass_i'].detach().cpu(),
+            'hn_mass_i_sample': route_aux['hn_mass_i'].detach().cpu(),
             'sim_pos_sample': pos_sim.detach().cpu(),
             'sim_neg_sample': neg_sim.detach().cpu(),
             'pairs_sampled': torch.tensor(float(neg_sim.numel())),
@@ -573,6 +701,7 @@ def contrastive_train(model, mv_data, mvc_loss,
             'FN_count_per_anchor': route_aux['FN_count_per_anchor'].detach().cpu(),
             'HN_count_per_anchor': route_aux['HN_count_per_anchor'].detach().cpu(),
             'gate_val': torch.tensor(gate_val),
+            'gate_stab': torch.tensor(float(stab_i.mean().item())),
         }
 
         print(f"[Epoch {epoch} Batch {batch_idx}] "
@@ -604,10 +733,20 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                                    max_epoch=100,
                                    initial_top_p=0.3,
                                    cross_warmup_epochs=50,
-                                   alpha_fn=0.1,
-                                   pi_fn=0.1,
                                    w_min=0.05,
-                                   hn_beta=0.1,
+                                   route_s0=0.3,
+                                   route_t_fn=0.5,
+                                   route_hn_temp=0.2,
+                                   gate_s0=0.5,
+                                   gate_tg=0.2,
+                                   gate_ema_rho=0.9,
+                                   bayes_lambda_p=0.7,
+                                   bayes_lambda_l=1.0,
+                                   bayes_delta=0.2,
+                                   mass_delta=0.05,
+                                   lambda_fn_pull=0.1,
+                                   lambda_hn_margin=0.1,
+                                   hn_margin=0.2,
                                    neg_mode='batch',
                                    knn_neg_k=20,
                                    route_uncertain_only=True,
@@ -631,7 +770,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
     criterion = torch.nn.MSELoss()
     total_loss = 0.0
     epoch_meter = {'L_total':0.0,'L_recon':0.0,'L_feat':0.0,'L_cross':0.0,'L_cluster':0.0,'L_uncert':0.0,'L_hn':0.0,'L_reg':0.0}
-    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'tau_u':0.0,'unsafe_ratio':0.0,'theta_p50_batch':0.0,'theta_p90_batch':0.0,'k_unc':0.0}
+    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'tau_u':0.0,'unsafe_ratio':0.0,'theta_p50_batch':0.0,'theta_p90_batch':0.0,'k_unc':0.0,'r_fn_mean':0.0,'w_neg_mean':0.0,'w_neg_p90':0.0,'fn_mass_i_mean':0.0,'hn_mass_i_mean':0.0,'fn_mass_i_p90':0.0,'hn_mass_i_p90':0.0,'fn_type_ratio':0.0,'hn_type_ratio':0.0,'neutral_ratio':0.0,'gate_stab':0.0,'L_fn_pull':0.0,'L_hn_margin':0.0}
     batch_count = 0
     last_dump = {}
 
@@ -655,6 +794,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         _, zs = model(sub_views)
         zs = [z_i.to(device) for z_i in zs]
         common_z = model.fusion(zs).to(device)
+        zs, common_z = _sanitize_latent_outputs(zs, common_z)
 
         # ——— 更新中心、隶属度、不确定度 ———
         model.update_centers(zs, common_z)
@@ -667,6 +807,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             update_ema=True,
             return_parts=True,
         )
+        u, u_hat, u_aux = _sanitize_uncertainty_outputs(u, u_hat, u_aux)
         B = u_hat.size(0)
 
         # ——— 模块A自适应不确定划分：tau_u + 证书扩展 + 保底约束 ———
@@ -679,6 +820,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
 
         uncertain = (u > tau_u)
         theta = _compute_theta_certificate(common_z, memberships[num_views], temperature=theta_temperature)
+        theta = torch.nan_to_num(theta, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
         unsafe_mask = (theta > theta_threshold) if enable_theta_certificate else torch.zeros_like(uncertain)
         uncertain = uncertain | unsafe_mask
         uncertain, k_unc = _bounded_uncertain_mask(
@@ -690,38 +832,62 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         certain = ~uncertain
         u_thr = u[topk_idx].min().item() if topk_idx.numel() > 0 else 0.0
 
-        # ——— 动态门控 Gate ———
+        # ——— 模块B稳定性门控：由稳定证据触发 ——
+        gate, stab_i, model.gate_ema = _compute_stability_gate(
+            u_aux,
+            gate_s0=gate_s0,
+            gate_tg=gate_tg,
+            gate_ema_prev=model.gate_ema,
+            gate_ema_rho=gate_ema_rho,
+        )
         u_mean = u_hat.mean().item()
         mu_lo, mu_hi = 0.3, 0.7
         gate_u = float((u_mean - mu_lo) / (mu_hi - mu_lo))
         gate_u = max(0.0, min(1.0, gate_u))
         t = float((epoch - 1) / max(1, max_epoch - 1))
-        gate_fn = t
-        gate_hn = t
-        gate = t
+        gate_fn = gate
+        gate_hn = gate
         gate_t = torch.tensor(gate, device=device)
 
         # ——— 共识中心 ———
         q_centers = model.compute_centers(common_z, batch_label)
 
         # ——— Design 1': pair-wise FN 风险路由（停用原 FN/HN MLP 路径）———
-        prev_batch = None if y_prev_labels is None else y_prev_labels[sample_idx].to(device)
         route_mask = uncertain if route_uncertain_only else None
         w_neg, eta_mat, rho_mat, route_stats, route_aux = _build_pairwise_fn_risk(
             common_z=common_z,
             memberships_cons=memberships[num_views],
             u_hat=u_hat,
-            batch_labels=batch_label,
-            prev_labels_batch=prev_batch,
+            gamma=u_aux['gamma'],
+            d_time=u_aux['d_time'],
             gate_val=gate,
-            alpha_fn=alpha_fn,
-            pi_fn=pi_fn,
+            route_s0=route_s0,
+            route_t_fn=route_t_fn,
+            route_th=route_s0,
+            route_hn_temp=route_hn_temp,
             w_min=w_min,
-            hn_beta=hn_beta,
             neg_mode=neg_mode,
             knn_k=knn_neg_k,
             uncertain_mask=route_mask,
         )
+
+        idx = sample_idx.to(device).long()
+        ema_q_batch = model.ema_q[idx]
+        fn_pull_loss, hn_margin_loss, fn_type, hn_type, neutral_type = _compute_anchor_route_losses(
+            common_z=common_z,
+            q_cons=memberships[num_views],
+            ema_q_batch=ema_q_batch,
+            uncertain_mask=uncertain,
+            q_centers=q_centers,
+            route_aux=route_aux,
+            bayes_lambda_p=bayes_lambda_p,
+            bayes_lambda_l=bayes_lambda_l,
+            bayes_delta=bayes_delta,
+            mass_delta=mass_delta,
+            hn_margin=hn_margin,
+        )
+        Lfn = gate_fn * lambda_fn_pull * fn_pull_loss
+        Lhnm = gate_hn * lambda_hn_margin * hn_margin_loss
 
         # ——— 构造并累加各视图的损失 ———
         batch_loss = 0.0
@@ -755,16 +921,8 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             Lu = (1 - gate_u) * lambda_u * u_l
             batch_loss += Lu
 
-            # d) Hard-Negative penalty from safe negatives (Design 1')
-            sim_mat = F.cosine_similarity(common_z.unsqueeze(1), common_z.unsqueeze(0), dim=2)
-            pos_sim = torch.diag(sim_mat)
-            eta_cnt = eta_mat.sum().float()
-            if eta_cnt > 0:
-                push = torch.relu((sim_mat - pos_sim.unsqueeze(1) + 0.2) * eta_mat.float()).sum() / (eta_cnt + 1e-12)
-            else:
-                push = torch.tensor(0.0, device=device)
-            pull = (1.0 - pos_sim).mean()
-            Lpen = gate_hn * (lambda_hn_penalty * push + lambda_hn_penalty * pull)
+            # d) 模块B anchor 定向损失（FN pull + HN margin）
+            Lpen = Lfn + Lhnm
             batch_loss += Lpen
 
             # e) 跨视图加权 InfoNCE
@@ -777,8 +935,12 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                 batch_loss += Lcross
 
         # ——— 梯度更新 ———
+        if not torch.isfinite(batch_loss):
+            print(f"[WARN] Skip batch {batch_idx} at epoch {epoch} due to non-finite batch_loss={float(batch_loss)}")
+            continue
         optimizer.zero_grad()
         batch_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
         optimizer.step()
         total_loss += batch_loss.item()
 
@@ -814,8 +976,8 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             'm_top1_sample': top2_m[:, 0].detach().cpu(),
             'm_gap_sample': (top2_m[:, 0] - top2_m[:, 1]).detach().cpu(),
             'y_curr_sample': batch_label.detach().cpu(),
-            'y_prev_sample': (prev_batch.detach().cpu() if prev_batch is not None else torch.full_like(batch_label.detach().cpu(), -1)),
-            'flip_mask_sample': ((batch_label != prev_batch).float().detach().cpu() if prev_batch is not None else torch.zeros_like(batch_label, dtype=torch.float32).detach().cpu()),
+            'y_prev_sample': torch.full_like(batch_label.detach().cpu(), -1),
+            'flip_mask_sample': torch.zeros_like(batch_label, dtype=torch.float32).detach().cpu(),
             'S_pair_sample': route_aux['S'][route_aux['neg_mask']].detach().cpu(),
             'w_pair_sample': route_aux['w_neg'][route_aux['neg_mask']].detach().cpu(),
             's_post_pair_sample': route_aux['s_post'][route_aux['neg_mask']].detach().cpu(),
@@ -824,6 +986,10 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             'eta_hn_pair_sample': route_aux['eta'][route_aux['neg_mask']].float().detach().cpu(),
             'r_pair_sample': route_aux['r'][route_aux['neg_mask']].detach().cpu(),
             's_stab_pair_sample': route_aux['s_stab'][route_aux['neg_mask']].detach().cpu(),
+            'r_fn_pair_sample': route_aux['r_fn'][route_aux['neg_mask']].detach().cpu(),
+            'hn_score_pair_sample': route_aux['hn_score'][route_aux['neg_mask']].detach().cpu(),
+            'fn_mass_i_sample': route_aux['fn_mass_i'].detach().cpu(),
+            'hn_mass_i_sample': route_aux['hn_mass_i'].detach().cpu(),
             'sim_pos_sample': pos_sim.detach().cpu(),
             'sim_neg_sample': neg_sim.detach().cpu(),
             'pairs_sampled': torch.tensor(float(neg_sim.numel())),
@@ -841,6 +1007,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             'FN_count_per_anchor': route_aux['FN_count_per_anchor'].detach().cpu(),
             'HN_count_per_anchor': route_aux['HN_count_per_anchor'].detach().cpu(),
             'gate_val': torch.tensor(gate),
+            'gate_stab': torch.tensor(float(stab_i.mean().item())),
         }
 
     if batch_count > 0:

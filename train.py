@@ -59,14 +59,38 @@ parser.add_argument('--neg_mode', default='batch', type=str, choices=['batch', '
                     help='Negative candidate mode for pair-wise FN risk routing.')
 parser.add_argument('--knn_neg_k', default=20, type=int,
                     help='k in kNN negatives when neg_mode=knn.')
-parser.add_argument('--alpha_fn', default=0.1, type=float,
-                    help='Top-risk quantile ratio for FN-risk negatives.')
-parser.add_argument('--pi_fn', default=0.1, type=float,
-                    help='FN-risk negative downweight strength.')
 parser.add_argument('--w_min', default=0.05, type=float,
                     help='Minimum negative weight for high FN-risk pairs.')
-parser.add_argument('--hn_beta', default=0.1, type=float,
-                    help='Hard-negative quantile in safe negatives.')
+parser.add_argument('--w_max', default=1.0, type=float,
+                    help='Maximum negative weight in Module-B pair weighting.')
+parser.add_argument('--route_s0', default=0.3, type=float,
+                    help='Module-B FN-risk prior center in pair evidence logits.')
+parser.add_argument('--route_t_fn', default=0.5, type=float,
+                    help='Module-B temperature for FN-risk probability mapping.')
+parser.add_argument('--route_hn_temp', default=0.2, type=float,
+                    help='Module-B temperature for HN hardness score.')
+parser.add_argument('--route_lambda_h', default=0.1, type=float,
+                    help='Module-B λ_h in pair weight w_ij = (1-p_ij)(1+λ_h h_ij).')
+parser.add_argument('--gate_s0', default=0.5, type=float,
+                    help='Module-B stability gate center.')
+parser.add_argument('--gate_tg', default=0.2, type=float,
+                    help='Module-B stability gate temperature.')
+parser.add_argument('--gate_ema_rho', default=0.9, type=float,
+                    help='EMA smoothing for Module-B stability gate.')
+parser.add_argument('--bayes_lambda_p', default=0.7, type=float,
+                    help='Exponent on EMA posterior in Module-B anchor Bayes fusion.')
+parser.add_argument('--bayes_lambda_l', default=1.0, type=float,
+                    help='Exponent on current posterior in Module-B anchor Bayes fusion.')
+parser.add_argument('--bayes_delta', default=0.2, type=float,
+                    help='Low-confidence gate for Module-B anchor routing.')
+parser.add_argument('--mass_delta', default=0.05, type=float,
+                    help='Minimum gap between fn_mass and hn_mass for anchor typing.')
+parser.add_argument('--lambda_fn_pull', default=0.1, type=float,
+                    help='Weight of Module-B FN pull loss.')
+parser.add_argument('--lambda_hn_margin', default=0.1, type=float,
+                    help='Weight of Module-B HN margin loss.')
+parser.add_argument('--hn_margin', default=0.2, type=float,
+                    help='Margin in Module-B HN directional loss.')
 parser.add_argument('--route_uncertain_only', default=True, type=lambda x: x.lower()=='true',
                     help='Apply pair-wise routing only for uncertain anchors.')
 parser.add_argument('--log_dist_interval', default=5, type=int,
@@ -219,10 +243,22 @@ if __name__ == "__main__":
                 args.lambda_hn_penalty,
                 args.temperature_f,
                 cross_warmup_epochs=args.cross_warmup_epochs,
-                alpha_fn=args.alpha_fn,
-                pi_fn=args.pi_fn,
                 w_min=args.w_min,
-                hn_beta=args.hn_beta,
+                w_max=args.w_max,
+                route_s0=args.route_s0,
+                route_t_fn=args.route_t_fn,
+                route_hn_temp=args.route_hn_temp,
+                route_lambda_h=args.route_lambda_h,
+                gate_s0=args.gate_s0,
+                gate_tg=args.gate_tg,
+                gate_ema_rho=args.gate_ema_rho,
+                bayes_lambda_p=args.bayes_lambda_p,
+                bayes_lambda_l=args.bayes_lambda_l,
+                bayes_delta=args.bayes_delta,
+                mass_delta=args.mass_delta,
+                lambda_fn_pull=args.lambda_fn_pull,
+                lambda_hn_margin=args.lambda_hn_margin,
+                hn_margin=args.hn_margin,
                 neg_mode=args.neg_mode,
                 knn_neg_k=args.knn_neg_k,
                 route_uncertain_only=args.route_uncertain_only,
@@ -258,14 +294,18 @@ if __name__ == "__main__":
             min_cluster = int(counts.min()) if counts.size > 0 else 0
             route_line = (
                 f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only={int(args.route_uncertain_only)} "
-                f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} alpha_fn={args.alpha_fn:.4f} pi_fn={args.pi_fn:.4f} "
-                f"w_min={args.w_min:.4f} hn_beta={args.hn_beta:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
+                f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} route_s0={args.route_s0:.4f} route_t_fn={args.route_t_fn:.4f} "
+                f"w_min={args.w_min:.4f} w_max={args.w_max:.4f} route_hn_temp={args.route_hn_temp:.4f} lambda_h={args.route_lambda_h:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
                 f"HN_ratio={_rget(R, 'hn_ratio', 0.0):.4f} FN_count={_rget(R, 'FN_count', 0.0):.0f} HN_count={_rget(R, 'HN_count', 0.0):.0f} neg_count={_rget(R, 'neg_count', 0.0):.0f} safe_neg_count={_rget(R, 'safe_neg_count', 0.0):.0f} "
                 f"mean_s_post_FN={_rget(R, 'mean_s_post_fn', 0.0):.4f} mean_s_post_nonFN={_rget(R, 'mean_s_post_non_fn', 0.0):.4f} "
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
                 f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} "
+                f"r_fn_mean={_rget(R, 'r_fn_mean', 0.0):.4f} w_neg_mean={_rget(R, 'w_neg_mean', 0.0):.4f} w_neg_p90={_rget(R, 'w_neg_p90', 0.0):.4f} "
+                f"fn_mass_i_mean={_rget(R, 'fn_mass_i_mean', 0.0):.4f} hn_mass_i_mean={_rget(R, 'hn_mass_i_mean', 0.0):.4f} "
+                f"fn_type_ratio={_rget(R, 'fn_type_ratio', 0.0):.4f} hn_type_ratio={_rget(R, 'hn_type_ratio', 0.0):.4f} neutral_ratio={_rget(R, 'neutral_ratio', 0.0):.4f} "
+                f"L_fn_pull={_rget(R, 'L_fn_pull', 0.0):.6f} L_hn_margin={_rget(R, 'L_hn_margin', 0.0):.6f} gate_stab={_rget(R, 'gate_stab', 0.0):.4f} "
                 f"tau_u={_rget(R, 'tau_u', 0.0):.4f} unsafe_ratio={_rget(R, 'unsafe_ratio', 0.0):.4f} theta_p50_batch={_rget(R, 'theta_p50_batch', 0.0):.4f}"
             )
             logger.info(metric_line)
@@ -368,10 +408,22 @@ if __name__ == "__main__":
                 lambda_hn_penalty=args.lambda_hn_penalty,
                 temperature_f=args.temperature_f,
                 cross_warmup_epochs=args.cross_warmup_epochs,
-                alpha_fn=args.alpha_fn,
-                pi_fn=args.pi_fn,
                 w_min=args.w_min,
-                hn_beta=args.hn_beta,
+                w_max=args.w_max,
+                route_s0=args.route_s0,
+                route_t_fn=args.route_t_fn,
+                route_hn_temp=args.route_hn_temp,
+                route_lambda_h=args.route_lambda_h,
+                gate_s0=args.gate_s0,
+                gate_tg=args.gate_tg,
+                gate_ema_rho=args.gate_ema_rho,
+                bayes_lambda_p=args.bayes_lambda_p,
+                bayes_lambda_l=args.bayes_lambda_l,
+                bayes_delta=args.bayes_delta,
+                mass_delta=args.mass_delta,
+                lambda_fn_pull=args.lambda_fn_pull,
+                lambda_hn_margin=args.lambda_hn_margin,
+                hn_margin=args.hn_margin,
                 neg_mode=args.neg_mode,
                 knn_neg_k=args.knn_neg_k,
                 route_uncertain_only=args.route_uncertain_only,
@@ -404,14 +456,18 @@ if __name__ == "__main__":
             min_cluster = int(counts.min()) if counts.size > 0 else 0
             route_line = (
                 f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only={int(args.route_uncertain_only)} "
-                f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} alpha_fn={args.alpha_fn:.4f} pi_fn={args.pi_fn:.4f} "
-                f"w_min={args.w_min:.4f} hn_beta={args.hn_beta:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
+                f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} route_s0={args.route_s0:.4f} route_t_fn={args.route_t_fn:.4f} "
+                f"w_min={args.w_min:.4f} w_max={args.w_max:.4f} route_hn_temp={args.route_hn_temp:.4f} lambda_h={args.route_lambda_h:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
                 f"HN_ratio={_rget(R, 'hn_ratio', 0.0):.4f} FN_count={_rget(R, 'FN_count', 0.0):.0f} HN_count={_rget(R, 'HN_count', 0.0):.0f} neg_count={_rget(R, 'neg_count', 0.0):.0f} safe_neg_count={_rget(R, 'safe_neg_count', 0.0):.0f} "
                 f"mean_s_post_FN={_rget(R, 'mean_s_post_fn', 0.0):.4f} mean_s_post_nonFN={_rget(R, 'mean_s_post_non_fn', 0.0):.4f} "
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
                 f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} "
+                f"r_fn_mean={_rget(R, 'r_fn_mean', 0.0):.4f} w_neg_mean={_rget(R, 'w_neg_mean', 0.0):.4f} w_neg_p90={_rget(R, 'w_neg_p90', 0.0):.4f} "
+                f"fn_mass_i_mean={_rget(R, 'fn_mass_i_mean', 0.0):.4f} hn_mass_i_mean={_rget(R, 'hn_mass_i_mean', 0.0):.4f} "
+                f"fn_type_ratio={_rget(R, 'fn_type_ratio', 0.0):.4f} hn_type_ratio={_rget(R, 'hn_type_ratio', 0.0):.4f} neutral_ratio={_rget(R, 'neutral_ratio', 0.0):.4f} "
+                f"L_fn_pull={_rget(R, 'L_fn_pull', 0.0):.6f} L_hn_margin={_rget(R, 'L_hn_margin', 0.0):.6f} gate_stab={_rget(R, 'gate_stab', 0.0):.4f} "
                 f"tau_u={_rget(R, 'tau_u', 0.0):.4f} unsafe_ratio={_rget(R, 'unsafe_ratio', 0.0):.4f} theta_p50_batch={_rget(R, 'theta_p50_batch', 0.0):.4f}"
             )
             logger.info(metric_line)

@@ -100,13 +100,6 @@ class Network(nn.Module):
             nn.Linear(fn_hn_hidden, 2)  # 输出 2 类 logits
         )
 
-        # LNM：FN 污染概率网络，建模 Pr(FN|pair features) 以做分母去污染。
-        self.pi_net = nn.Sequential(
-            nn.Linear(5, fn_hn_hidden),
-            nn.ReLU(),
-            nn.Linear(fn_hn_hidden, 1)
-        )
-
     def forward(self, xs):
         xrs = []
         zs = []

@@ -89,13 +89,6 @@ def pre_train(model, mv_data, batch_size, epochs, optimizer):
 def _adaptive_u_threshold(u, method='otsu', bins=64, eps=1e-12):
     """模块A：由当下 u 分布自适应估计 tau_u（当前实现：Otsu）。"""
     u = u.detach().reshape(-1)
-    # 数值安全：过滤 NaN/Inf，避免 torch.histc 在非有限区间报错
-    finite_mask = torch.isfinite(u)
-    if finite_mask.any():
-        u = u[finite_mask]
-    else:
-        return 0.5
-
     if u.numel() <= 1:
         return float(u.mean().item()) if u.numel() > 0 else 0.5
 
@@ -118,18 +111,6 @@ def _adaptive_u_threshold(u, method='otsu', bins=64, eps=1e-12):
     sigma_b[~torch.isfinite(sigma_b)] = -1.0
     idx = int(torch.argmax(sigma_b).item())
     return float(centers[idx].item())
-
-
-def _sanitize_uncertainty_outputs(u, u_hat, u_aux):
-    """数值防护：将不确定度相关张量中的 NaN/Inf 回填到有限值域。"""
-    u = torch.nan_to_num(u, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-    u_hat = torch.nan_to_num(u_hat, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-    u_aux = dict(u_aux)
-    u_aux['gamma'] = torch.nan_to_num(u_aux['gamma'], nan=0.0, posinf=20.0, neginf=-20.0)
-    u_aux['d_view'] = torch.nan_to_num(u_aux['d_view'], nan=0.0, posinf=10.0, neginf=0.0).clamp(min=0.0)
-    u_aux['d_time'] = torch.nan_to_num(u_aux['d_time'], nan=0.0, posinf=10.0, neginf=0.0).clamp(min=0.0)
-    u_aux['q_cons'] = torch.nan_to_num(u_aux['q_cons'], nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-    return u, u_hat, u_aux
 
 
 def _compute_theta_certificate(common_z, q_cons, temperature=0.5, eps=1e-12):
@@ -313,8 +294,8 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, gamma, d_time,
 
 def _compute_stability_gate(u_aux, gate_s0=0.5, gate_tg=0.2, gate_ema_prev=None, gate_ema_rho=0.9):
     """模块B门控：用 margin 与时间稳定性的并联证据触发，避免仅靠 epoch 线性门控。"""
-    gamma = torch.nan_to_num(u_aux['gamma'].detach(), nan=0.0, posinf=20.0, neginf=-20.0)
-    d_time = torch.nan_to_num(u_aux['d_time'].detach(), nan=0.0, posinf=10.0, neginf=0.0).clamp(min=0.0)
+    gamma = u_aux['gamma'].detach()
+    d_time = u_aux['d_time'].detach().clamp(min=0.0)
     stab_i = (torch.sigmoid(gamma) * torch.exp(-d_time)).clamp(0.0, 1.0)
     stab_batch = float(stab_i.mean().item())
     if gate_ema_prev is None:
@@ -463,7 +444,6 @@ def contrastive_train(model, mv_data, mvc_loss,
             update_ema=True,
             return_parts=True,
         )
-        u, u_hat, u_aux = _sanitize_uncertainty_outputs(u, u_hat, u_aux)
         batch_N  = u_hat.size(0)
 
         # ——— 4) 模块A自适应不确定划分：tau_u + 证书扩展 + 保底约束 ———
@@ -476,7 +456,6 @@ def contrastive_train(model, mv_data, mvc_loss,
 
         uncertain_mask = (u > tau_u)
         theta = _compute_theta_certificate(common_z, memberships[num_views], temperature=theta_temperature)
-        theta = torch.nan_to_num(theta, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
         unsafe_mask = (theta > theta_threshold) if enable_theta_certificate else torch.zeros_like(uncertain_mask)
         uncertain_mask = uncertain_mask | unsafe_mask
         uncertain_mask, k_unc = _bounded_uncertain_mask(
@@ -794,7 +773,6 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             update_ema=True,
             return_parts=True,
         )
-        u, u_hat, u_aux = _sanitize_uncertainty_outputs(u, u_hat, u_aux)
         B = u_hat.size(0)
 
         # ——— 模块A自适应不确定划分：tau_u + 证书扩展 + 保底约束 ———
@@ -807,7 +785,6 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
 
         uncertain = (u > tau_u)
         theta = _compute_theta_certificate(common_z, memberships[num_views], temperature=theta_temperature)
-        theta = torch.nan_to_num(theta, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
         unsafe_mask = (theta > theta_threshold) if enable_theta_certificate else torch.zeros_like(uncertain)
         uncertain = uncertain | unsafe_mask
         uncertain, k_unc = _bounded_uncertain_mask(

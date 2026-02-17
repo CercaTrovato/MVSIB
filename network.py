@@ -190,7 +190,6 @@ class Network(nn.Module):
         # 禁用梯度
         with torch.no_grad():
             for v, z in enumerate(features):
-                z = torch.nan_to_num(z, nan=0.0, posinf=1.0, neginf=-1.0)
                 km = torch_clustering.PyTorchKMeans(
                     init='k-means++',
                     n_clusters=self.num_clusters,
@@ -201,23 +200,8 @@ class Network(nn.Module):
                     verbose=False
                 )
                 # fit_predict 不会记录计算图
-                labels = km.fit_predict(z.to(dtype=torch.float64))
-                centers = km.cluster_centers_
-
-                # 数值/接口安全：某些异常输入时 fit_predict 或 centers 可能返回 None
-                if labels is None or centers is None:
-                    if self.centers[v] is not None:
-                        centers = self.centers[v].detach()
-                        dist_sq = torch.cdist(z, centers, p=2) ** 2
-                        labels = torch.argmin(dist_sq, dim=1)
-                    else:
-                        rand_idx = torch.randint(0, z.size(0), (self.num_clusters,), device=z.device)
-                        centers = z[rand_idx].detach()
-                        dist_sq = torch.cdist(z, centers, p=2) ** 2
-                        labels = torch.argmin(dist_sq, dim=1)
-
-                labels = labels.to(self.device).long()
-                centers = torch.nan_to_num(centers.to(dtype=z.dtype).to(self.device), nan=0.0, posinf=1.0, neginf=-1.0)
+                labels = km.fit_predict(z.to(dtype=torch.float64)).to(self.device).long()
+                centers = km.cluster_centers_.to(dtype=z.dtype).to(self.device)  # (L, d)
 
                 # 计算每个样本到其簇中心的距离
                 assigned = centers[labels]  # (N, d)

@@ -177,6 +177,83 @@ def _compute_gate_by_stability(d_time, gate_mode='linear', linear_t=0.0,
     return float(gate), float(stab_t), float(ema_stab)
 
 
+def _ensure_module_c_ema_stats(model, num_clusters, feat_dim, device):
+    """模块C：维护全局EMA统计（n_k, R_k, gamma_bar_k, Sigma_k），用于稳定长尾判定。"""
+    if hasattr(model, 'module_c_ema_stats') and model.module_c_ema_stats is not None:
+        return
+    eye = torch.eye(feat_dim, device=device)
+    model.module_c_ema_stats = {
+        'n_k_ema': torch.ones(num_clusters, device=device),
+        'R_k_ema': torch.ones(num_clusters, device=device),
+        'gamma_bar_k_ema': torch.zeros(num_clusters, device=device),
+        'Sigma_k_ema': eye.unsqueeze(0).repeat(num_clusters, 1, 1),
+    }
+
+
+def _init_module_c_epoch_stats(num_clusters, feat_dim, device):
+    return {
+        'count': torch.zeros(num_clusters, device=device),
+        'sum_x': torch.zeros(num_clusters, feat_dim, device=device),
+        'sum_xx': torch.zeros(num_clusters, feat_dim, feat_dim, device=device),
+        'gamma_sum': torch.zeros(num_clusters, device=device),
+        'dist_buf': [[] for _ in range(num_clusters)],
+    }
+
+
+def _accumulate_module_c_epoch_stats(epoch_stats, labels, q_cons, common_z, q_centers):
+    """模块C：按 batch 累积到 epoch 级统计，避免 batch-only 的 minority 抖动。"""
+    top2 = torch.topk(q_cons.detach(), 2, dim=1).values
+    gamma = torch.log((top2[:, 0] + 1e-12) / (top2[:, 1] + 1e-12))
+    uniq = torch.unique(labels)
+    for k_t in uniq:
+        k = int(k_t.item())
+        mask = (labels == k)
+        feats = common_z[mask].detach()
+        if feats.numel() == 0:
+            continue
+        n_k = float(feats.size(0))
+        epoch_stats['count'][k] += n_k
+        epoch_stats['sum_x'][k] += feats.sum(dim=0)
+        epoch_stats['sum_xx'][k] += feats.t().mm(feats)
+        epoch_stats['gamma_sum'][k] += gamma[mask].sum()
+        d = torch.norm(feats - q_centers[k].detach().unsqueeze(0), dim=1)
+        epoch_stats['dist_buf'][k].append(d.detach().cpu())
+
+
+def _update_module_c_ema_stats(model, epoch_stats, ema_rho=0.9):
+    """模块C：epoch 结束后更新 EMA 统计，供下一 epoch 的 ISM+ 使用。"""
+    stats = model.module_c_ema_stats
+    K = stats['n_k_ema'].numel()
+    D = stats['Sigma_k_ema'].size(1)
+    eye = torch.eye(D, device=stats['Sigma_k_ema'].device)
+
+    for k in range(K):
+        n_k = float(epoch_stats['count'][k].item())
+        if n_k <= 0:
+            continue
+        sum_x = epoch_stats['sum_x'][k]
+        sum_xx = epoch_stats['sum_xx'][k]
+        mu = sum_x / n_k
+        if n_k > 1:
+            cov = (sum_xx - n_k * torch.ger(mu, mu)) / max(n_k - 1.0, 1.0)
+        else:
+            cov = eye
+        cov = cov + 1e-6 * eye
+
+        if len(epoch_stats['dist_buf'][k]) > 0:
+            d_cat = torch.cat(epoch_stats['dist_buf'][k], dim=0)
+            r_k = float(torch.quantile(d_cat.to(mu.device), 0.7).item())
+        else:
+            r_k = float(stats['R_k_ema'][k].item())
+
+        gamma_k = float(epoch_stats['gamma_sum'][k].item() / max(n_k, 1.0))
+        rho = float(ema_rho)
+        stats['n_k_ema'][k] = rho * stats['n_k_ema'][k] + (1.0 - rho) * n_k
+        stats['R_k_ema'][k] = rho * stats['R_k_ema'][k] + (1.0 - rho) * r_k
+        stats['gamma_bar_k_ema'][k] = rho * stats['gamma_bar_k_ema'][k] + (1.0 - rho) * gamma_k
+        stats['Sigma_k_ema'][k] = rho * stats['Sigma_k_ema'][k] + (1.0 - rho) * cov
+
+
 def _build_pairwise_prob_weights(common_z, memberships_cons, uncertain_mask=None,
                                  pos_mask=None,
                                  neg_mode='batch', knn_k=20,
@@ -488,7 +565,8 @@ def contrastive_train(model, mv_data, mvc_loss,
                       wneg_stopgrad_q=True,
                       gate_stab_s0=0.5,
                       gate_stab_tg=0.1,
-                      gate_stab_ema_rho=0.9):
+                      gate_stab_ema_rho=0.9,
+                      module_c_stat_ema_rho=0.9):
     model.train()
     mv_data_loader, num_views, num_samples, num_clusters = get_multiview_data(mv_data, batch_size)
 
@@ -512,9 +590,12 @@ def contrastive_train(model, mv_data, mvc_loss,
     criterion = torch.nn.MSELoss()  # 添加重建损失的损失函数
 
     epoch_meter = {'L_total':0.0,'L_recon':0.0,'L_feat':0.0,'L_cross':0.0,'L_cluster':0.0,'L_uncert':0.0,'L_hn':0.0,'L_reg':0.0}
-    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'tau_u':0.0,'unsafe_ratio':0.0,'theta_p50_batch':0.0,'theta_p90_batch':0.0,'k_unc':0.0,'w_neg_mean':0.0,'w_neg_p50':0.0,'w_neg_p90':0.0,'pij_mean_on_neg':0.0,'hij_mean':0.0,'wneg_active_pairs':0.0,'gate_stab':0.0,'stab_t':0.0,'EMA_stab':0.0}
+    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'tau_u':0.0,'unsafe_ratio':0.0,'theta_p50_batch':0.0,'theta_p90_batch':0.0,'k_unc':0.0,'w_neg_mean':0.0,'w_neg_p50':0.0,'w_neg_p90':0.0,'pij_mean_on_neg':0.0,'hij_mean':0.0,'wneg_active_pairs':0.0,'gate_stab':0.0,'stab_t':0.0,'EMA_stab':0.0,
+                   'minority_set_size':0.0,'minority_count_mean':0.0,'minority_radius_mean':0.0,'minority_gamma_mean':0.0,
+                   'module_c_sample_fail_rate':0.0,'module_c_fallback_rate':0.0,'L_proto_align':0.0,'L_conf_repulse':0.0}
     batch_count = 0
     last_dump = {}
+    module_c_epoch_stats = None
 
     for batch_idx, (sub_data_views, _, sample_idx) in enumerate(mv_data_loader):
         # ——— 1) 伪标签 & 同/异样本矩阵 ———
@@ -527,6 +608,10 @@ def contrastive_train(model, mv_data, mvc_loss,
 
         # 现在有了 common_z，确定 device
         device = common_z.device
+
+        if module_c_epoch_stats is None:
+            _ensure_module_c_ema_stats(model, num_clusters, common_z.size(1), device)
+            module_c_epoch_stats = _init_module_c_epoch_stats(num_clusters, common_z.size(1), device)
 
         # 把索引张量都搬到 device
         batch_psedo_label = batch_psedo_label.to(device)
@@ -589,6 +674,7 @@ def contrastive_train(model, mv_data, mvc_loss,
 
         # ——— 6) 计算共识中心 q_centers ———
         q_centers = model.compute_centers(common_z, batch_psedo_label)
+        _accumulate_module_c_epoch_stats(module_c_epoch_stats, batch_psedo_label, memberships[num_views], common_z, q_centers)
 
         # ——— 7) 模块B路由：legacy / prob 可切换（保证baseline可复现）———
         prev_batch = None if y_prev_labels is None else y_prev_labels[sample_idx].to(device)
@@ -637,15 +723,21 @@ def contrastive_train(model, mv_data, mvc_loss,
             # a) 簇级 InfoNCE
             k_centers = model.compute_centers(zs[v], batch_psedo_label)
             if epoch <= 50:
-                cl = mvc_loss.compute_cluster_loss(q_centers, k_centers, batch_psedo_label)
+                cl, module_c_detail = mvc_loss.compute_cluster_loss(
+                    q_centers, k_centers, batch_psedo_label,
+                    return_details=True
+                )
             else:
-                mask = torch.ones(mvc_loss.num_clusters, dtype=torch.bool, device=device)
-                cl, _, _ = mvc_loss.compute_cluster_loss(
+                cl, _, _, module_c_detail = mvc_loss.compute_cluster_loss(
                     q_centers, k_centers, batch_psedo_label,
                     features_batch=common_z,
-                    global_minority_mask=mask,
-                    return_mmd_excl=True
+                    module_c_stats=model.module_c_ema_stats,
+                    return_mmd_excl=True,
+                    return_details=True,
                 )
+            for mk in ['minority_set_size','minority_count_mean','minority_radius_mean','minority_gamma_mean',
+                       'module_c_sample_fail_rate','module_c_fallback_rate','L_proto_align','L_conf_repulse']:
+                route_stats[mk] = module_c_detail.get(mk, 0.0)
             Lcl_i = alpha * cl
             Lcl += Lcl_i.item()
             loss_list.append(Lcl_i)
@@ -762,6 +854,14 @@ def contrastive_train(model, mv_data, mvc_loss,
             'gate_val': torch.tensor(gate_val),
             'p_pair_sample': route_aux['p'][route_aux['neg_mask_effective']].detach().cpu() if 'p' in route_aux else torch.zeros(0),
             'h_pair_sample': route_aux['h'][route_aux['neg_mask_effective']].detach().cpu() if 'h' in route_aux else torch.zeros(0),
+            'minority_set_size': torch.tensor(route_stats.get('minority_set_size', 0.0)),
+            'minority_count_mean': torch.tensor(route_stats.get('minority_count_mean', 0.0)),
+            'minority_radius_mean': torch.tensor(route_stats.get('minority_radius_mean', 0.0)),
+            'minority_gamma_mean': torch.tensor(route_stats.get('minority_gamma_mean', 0.0)),
+            'module_c_sample_fail_rate': torch.tensor(route_stats.get('module_c_sample_fail_rate', 0.0)),
+            'module_c_fallback_rate': torch.tensor(route_stats.get('module_c_fallback_rate', 0.0)),
+            'L_proto_align': torch.tensor(route_stats.get('L_proto_align', 0.0)),
+            'L_conf_repulse': torch.tensor(route_stats.get('L_conf_repulse', 0.0)),
         }
 
         print(f"[Epoch {epoch} Batch {batch_idx}] "
@@ -770,6 +870,9 @@ def contrastive_train(model, mv_data, mvc_loss,
               f"U_ratio={route_stats['U_ratio']:.3f} stab={route_stats['stab_rate']:.3f}")
 
     # ===== 训练循环结束 =====
+    if module_c_epoch_stats is not None:
+        _update_module_c_ema_stats(model, module_c_epoch_stats, ema_rho=module_c_stat_ema_rho)
+
     if batch_count > 0:
         for k in epoch_meter:
             epoch_meter[k] /= batch_count
@@ -819,7 +922,8 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                                    wneg_stopgrad_q=True,
                                    gate_stab_s0=0.5,
                                    gate_stab_tg=0.1,
-                                   gate_stab_ema_rho=0.9):
+                                   gate_stab_ema_rho=0.9,
+                                   module_c_stat_ema_rho=0.9):
     """
     大数据集版 Contrastive Training：
     - k: 用于构建每个视图下的 k-NN 图
@@ -830,9 +934,12 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
     criterion = torch.nn.MSELoss()
     total_loss = 0.0
     epoch_meter = {'L_total':0.0,'L_recon':0.0,'L_feat':0.0,'L_cross':0.0,'L_cluster':0.0,'L_uncert':0.0,'L_hn':0.0,'L_reg':0.0}
-    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'tau_u':0.0,'unsafe_ratio':0.0,'theta_p50_batch':0.0,'theta_p90_batch':0.0,'k_unc':0.0,'w_neg_mean':0.0,'w_neg_p50':0.0,'w_neg_p90':0.0,'pij_mean_on_neg':0.0,'hij_mean':0.0,'wneg_active_pairs':0.0,'gate_stab':0.0,'stab_t':0.0,'EMA_stab':0.0}
+    route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0,'tau_u':0.0,'unsafe_ratio':0.0,'theta_p50_batch':0.0,'theta_p90_batch':0.0,'k_unc':0.0,'w_neg_mean':0.0,'w_neg_p50':0.0,'w_neg_p90':0.0,'pij_mean_on_neg':0.0,'hij_mean':0.0,'wneg_active_pairs':0.0,'gate_stab':0.0,'stab_t':0.0,'EMA_stab':0.0,
+                   'minority_set_size':0.0,'minority_count_mean':0.0,'minority_radius_mean':0.0,'minority_gamma_mean':0.0,
+                   'module_c_sample_fail_rate':0.0,'module_c_fallback_rate':0.0,'L_proto_align':0.0,'L_conf_repulse':0.0}
     batch_count = 0
     last_dump = {}
+    module_c_epoch_stats = None
 
     if not hasattr(model, 'tau_u_ema'):
         model.tau_u_ema = None
@@ -856,6 +963,9 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         _, zs = model(sub_views)
         zs = [z_i.to(device) for z_i in zs]
         common_z = model.fusion(zs).to(device)
+        if module_c_epoch_stats is None:
+            _ensure_module_c_ema_stats(model, num_clusters, common_z.size(1), device)
+            module_c_epoch_stats = _init_module_c_epoch_stats(num_clusters, common_z.size(1), device)
 
         # ——— 更新中心、隶属度、不确定度 ———
         model.update_centers(zs, common_z)
@@ -913,6 +1023,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
 
         # ——— 共识中心 ———
         q_centers = model.compute_centers(common_z, batch_label)
+        _accumulate_module_c_epoch_stats(module_c_epoch_stats, batch_label, memberships[num_views], common_z, q_centers)
 
         # ——— 模块B路由：legacy / prob 可切换（保证baseline可复现）———
         prev_batch = None if y_prev_labels is None else y_prev_labels[sample_idx].to(device)
@@ -959,15 +1070,21 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             # a) 簇级 InfoNCE
             kv_centers = model.compute_centers(zs[v], batch_label)
             if epoch <= 50:
-                cl = mvc_loss.compute_cluster_loss(q_centers, kv_centers, batch_label)
+                cl, module_c_detail = mvc_loss.compute_cluster_loss(
+                    q_centers, kv_centers, batch_label,
+                    return_details=True,
+                )
             else:
-                mask = torch.ones(mvc_loss.num_clusters, dtype=torch.bool, device=device)
-                cl, _, _ = mvc_loss.compute_cluster_loss(
+                cl, _, _, module_c_detail = mvc_loss.compute_cluster_loss(
                     q_centers, kv_centers, batch_label,
                     features_batch=common_z,
-                    global_minority_mask=mask,
-                    return_mmd_excl=True
+                    module_c_stats=model.module_c_ema_stats,
+                    return_mmd_excl=True,
+                    return_details=True,
                 )
+            for mk in ['minority_set_size','minority_count_mean','minority_radius_mean','minority_gamma_mean',
+                       'module_c_sample_fail_rate','module_c_fallback_rate','L_proto_align','L_conf_repulse']:
+                route_stats[mk] = module_c_detail.get(mk, 0.0)
             Lcl = alpha * cl
             batch_loss += Lcl
 
@@ -1072,7 +1189,18 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             'gate_val': torch.tensor(gate),
             'p_pair_sample': route_aux['p'][route_aux['neg_mask_effective']].detach().cpu() if 'p' in route_aux else torch.zeros(0),
             'h_pair_sample': route_aux['h'][route_aux['neg_mask_effective']].detach().cpu() if 'h' in route_aux else torch.zeros(0),
+            'minority_set_size': torch.tensor(route_stats.get('minority_set_size', 0.0)),
+            'minority_count_mean': torch.tensor(route_stats.get('minority_count_mean', 0.0)),
+            'minority_radius_mean': torch.tensor(route_stats.get('minority_radius_mean', 0.0)),
+            'minority_gamma_mean': torch.tensor(route_stats.get('minority_gamma_mean', 0.0)),
+            'module_c_sample_fail_rate': torch.tensor(route_stats.get('module_c_sample_fail_rate', 0.0)),
+            'module_c_fallback_rate': torch.tensor(route_stats.get('module_c_fallback_rate', 0.0)),
+            'L_proto_align': torch.tensor(route_stats.get('L_proto_align', 0.0)),
+            'L_conf_repulse': torch.tensor(route_stats.get('L_conf_repulse', 0.0)),
         }
+
+    if module_c_epoch_stats is not None:
+        _update_module_c_ema_stats(model, module_c_epoch_stats, ema_rho=module_c_stat_ema_rho)
 
     if batch_count > 0:
         for k in epoch_meter:

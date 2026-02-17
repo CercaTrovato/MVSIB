@@ -109,6 +109,32 @@ parser.add_argument('--gate_stab_tg', default=0.1, type=float,
                     help='Stability gate temperature Tg.')
 parser.add_argument('--gate_stab_ema_rho', default=0.9, type=float,
                     help='EMA rho for stability-triggered gate in Module-B.')
+parser.add_argument('--module_c_minority_ratio', default=0.5, type=float,
+                    help='Module-C minority criterion for n_k_ema <= minority_ratio * max(n_ema).')
+parser.add_argument('--module_c_radius_quantile', default=0.7, type=float,
+                    help='Module-C radius threshold quantile for R_k_ema.')
+parser.add_argument('--module_c_gamma_threshold', default=0.5, type=float,
+                    help='Module-C gamma threshold in minority rule: n small and (R large or gamma small).')
+parser.add_argument('--module_c_cov_shrink', default=0.2, type=float,
+                    help='Module-C covariance shrinkage rho in Sigma\'=(1-rho)Sigma+rho I.')
+parser.add_argument('--module_c_trunc_scale', default=1.0, type=float,
+                    help='Module-C truncation scale for radius gate ||psi-mu|| <= trunc_scale * R_k.')
+parser.add_argument('--module_c_cov_eps', default=1e-5, type=float,
+                    help='Module-C covariance jitter epsilon for stable Cholesky.')
+parser.add_argument('--module_c_sigma_min_samples', default=8, type=int,
+                    help='Module-C minimum effective samples before using EMA covariance; otherwise use I.')
+parser.add_argument('--module_c_sample_retry', default=8, type=int,
+                    help='Module-C max retries for truncated Gaussian sampling.')
+parser.add_argument('--module_c_boundary_rmax', default=1.0, type=float,
+                    help='Module-C fallback boundary max radius for random-direction boundary point.')
+parser.add_argument('--module_c_stat_ema_rho', default=0.9, type=float,
+                    help='Module-C EMA rho for epoch-level cluster statistics.')
+parser.add_argument('--module_c_proto_align_weight', default=0.2, type=float,
+                    help='Weight for Module-C proto-align term.')
+parser.add_argument('--module_c_conf_repulse_weight', default=0.2, type=float,
+                    help='Weight for Module-C confusion-neighbor repulsion term.')
+parser.add_argument('--module_c_conf_margin', default=0.2, type=float,
+                    help='Margin m in Module-C confusion repulsion: ReLU(m + cos(psi,mu_k-) - cos(psi,mu_k)).')
 args = parser.parse_args()
 
 
@@ -204,8 +230,23 @@ if __name__ == "__main__":
         weight_decay=args.weight_decay
     )
 
-    mvc_loss = Loss(args.batch_size, num_clusters,
-                    args.temperature_l, args.temperature_f).to(device)
+    mvc_loss = Loss(
+        args.batch_size, num_clusters,
+        args.temperature_l, args.temperature_f,
+        module_c_minority_ratio=args.module_c_minority_ratio,
+        module_c_radius_quantile=args.module_c_radius_quantile,
+        module_c_gamma_threshold=args.module_c_gamma_threshold,
+        module_c_cov_shrink=args.module_c_cov_shrink,
+        module_c_trunc_scale=args.module_c_trunc_scale,
+        module_c_cov_eps=args.module_c_cov_eps,
+        module_c_sigma_min_samples=args.module_c_sigma_min_samples,
+        module_c_sample_retry=args.module_c_sample_retry,
+        module_c_boundary_rmax=args.module_c_boundary_rmax,
+        module_c_stat_ema_rho=args.module_c_stat_ema_rho,
+        module_c_proto_align_weight=args.module_c_proto_align_weight,
+        module_c_conf_repulse_weight=args.module_c_conf_repulse_weight,
+        module_c_conf_margin=args.module_c_conf_margin,
+    ).to(device)
 
     nowtime = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     logger = Logger(f"{args.dataset}=={nowtime}")
@@ -264,6 +305,7 @@ if __name__ == "__main__":
                 gate_stab_s0=args.gate_stab_s0,
                 gate_stab_tg=args.gate_stab_tg,
                 gate_stab_ema_rho=args.gate_stab_ema_rho,
+                module_c_stat_ema_rho=args.module_c_stat_ema_rho,
             )
 
             epoch_list.append(epoch)
@@ -299,7 +341,11 @@ if __name__ == "__main__":
                 f"tau_u={_rget(R, 'tau_u', 0.0):.4f} unsafe_ratio={_rget(R, 'unsafe_ratio', 0.0):.4f} theta_p50_batch={_rget(R, 'theta_p50_batch', 0.0):.4f} "
                 f"w_neg_mean={_rget(R, 'w_neg_mean', 0.0):.4f} w_neg_p50={_rget(R, 'w_neg_p50', 0.0):.4f} w_neg_p90={_rget(R, 'w_neg_p90', 0.0):.4f} "
                 f"pij_mean_on_neg={_rget(R, 'pij_mean_on_neg', 0.0):.4f} hij_mean={_rget(R, 'hij_mean', 0.0):.4f} "
-                f"gate_stab={_rget(R, 'gate_stab', 0.0):.4f} stab_t={_rget(R, 'stab_t', 0.0):.4f} EMA_stab={_rget(R, 'EMA_stab', 0.0):.4f}"
+                f"gate_stab={_rget(R, 'gate_stab', 0.0):.4f} stab_t={_rget(R, 'stab_t', 0.0):.4f} EMA_stab={_rget(R, 'EMA_stab', 0.0):.4f} "
+                f"minority_set_size={_rget(R, 'minority_set_size', 0.0):.2f} minority_count_mean={_rget(R, 'minority_count_mean', 0.0):.3f} "
+                f"minority_radius_mean={_rget(R, 'minority_radius_mean', 0.0):.3f} minority_gamma_mean={_rget(R, 'minority_gamma_mean', 0.0):.3f} "
+                f"module_c_sample_fail_rate={_rget(R, 'module_c_sample_fail_rate', 0.0):.4f} module_c_fallback_rate={_rget(R, 'module_c_fallback_rate', 0.0):.4f} "
+                f"L_proto_align={_rget(R, 'L_proto_align', 0.0):.4f} L_conf_repulse={_rget(R, 'L_conf_repulse', 0.0):.4f}"
             )
             logger.info(metric_line)
             logger.info(route_line)
@@ -426,6 +472,7 @@ if __name__ == "__main__":
                 gate_stab_s0=args.gate_stab_s0,
                 gate_stab_tg=args.gate_stab_tg,
                 gate_stab_ema_rho=args.gate_stab_ema_rho,
+                module_c_stat_ema_rho=args.module_c_stat_ema_rho,
             )
 
 
@@ -458,7 +505,11 @@ if __name__ == "__main__":
                 f"tau_u={_rget(R, 'tau_u', 0.0):.4f} unsafe_ratio={_rget(R, 'unsafe_ratio', 0.0):.4f} theta_p50_batch={_rget(R, 'theta_p50_batch', 0.0):.4f} "
                 f"w_neg_mean={_rget(R, 'w_neg_mean', 0.0):.4f} w_neg_p50={_rget(R, 'w_neg_p50', 0.0):.4f} w_neg_p90={_rget(R, 'w_neg_p90', 0.0):.4f} "
                 f"pij_mean_on_neg={_rget(R, 'pij_mean_on_neg', 0.0):.4f} hij_mean={_rget(R, 'hij_mean', 0.0):.4f} "
-                f"gate_stab={_rget(R, 'gate_stab', 0.0):.4f} stab_t={_rget(R, 'stab_t', 0.0):.4f} EMA_stab={_rget(R, 'EMA_stab', 0.0):.4f}"
+                f"gate_stab={_rget(R, 'gate_stab', 0.0):.4f} stab_t={_rget(R, 'stab_t', 0.0):.4f} EMA_stab={_rget(R, 'EMA_stab', 0.0):.4f} "
+                f"minority_set_size={_rget(R, 'minority_set_size', 0.0):.2f} minority_count_mean={_rget(R, 'minority_count_mean', 0.0):.3f} "
+                f"minority_radius_mean={_rget(R, 'minority_radius_mean', 0.0):.3f} minority_gamma_mean={_rget(R, 'minority_gamma_mean', 0.0):.3f} "
+                f"module_c_sample_fail_rate={_rget(R, 'module_c_sample_fail_rate', 0.0):.4f} module_c_fallback_rate={_rget(R, 'module_c_fallback_rate', 0.0):.4f} "
+                f"L_proto_align={_rget(R, 'L_proto_align', 0.0):.4f} L_conf_repulse={_rget(R, 'L_conf_repulse', 0.0):.4f}"
             )
             logger.info(metric_line)
             logger.info(route_line)

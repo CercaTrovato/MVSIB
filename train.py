@@ -89,6 +89,26 @@ parser.add_argument('--theta_threshold', default=0.5, type=float,
                     help='Unsafe certificate threshold Theta for forcing into U_t.')
 parser.add_argument('--enable_theta_certificate', default=True, type=lambda x: x.lower()=='true',
                     help='Enable theta_i safety certificate to expand uncertain set.')
+parser.add_argument('--module_b_mode', default='legacy', type=str, choices=['legacy', 'prob'],
+                    help='Module-B routing mode: legacy quantile routing or probability-weight routing.')
+parser.add_argument('--module_b_gate_mode', default='linear', type=str, choices=['linear', 'stability'],
+                    help='Module-B gate mode: linear schedule or stability-triggered gate.')
+parser.add_argument('--w_max', default=1.0, type=float,
+                    help='Upper bound for probability-based negative weight in Module-B.')
+parser.add_argument('--lambda_h', default=0.5, type=float,
+                    help='HN enhancement strength in Module-B probability routing.')
+parser.add_argument('--hn_s0', default=0.3, type=float,
+                    help='Similarity pivot s0 in h_ij = sigmoid((s-s0)/T_h)*(1-p).')
+parser.add_argument('--hn_th', default=0.1, type=float,
+                    help='Temperature T_h for HN hardness term h_ij.')
+parser.add_argument('--wneg_stopgrad_q', default=True, type=lambda x: x.lower()=='true',
+                    help='Detach q when constructing w_neg to avoid posterior-shortcut behavior.')
+parser.add_argument('--gate_stab_s0', default=0.5, type=float,
+                    help='Stability gate center s0 in sigmoid((EMA_stab-s0)/Tg).')
+parser.add_argument('--gate_stab_tg', default=0.1, type=float,
+                    help='Stability gate temperature Tg.')
+parser.add_argument('--gate_stab_ema_rho', default=0.9, type=float,
+                    help='EMA rho for stability-triggered gate in Module-B.')
 args = parser.parse_args()
 
 
@@ -234,6 +254,16 @@ if __name__ == "__main__":
                 theta_temperature=args.theta_temperature,
                 theta_threshold=args.theta_threshold,
                 enable_theta_certificate=args.enable_theta_certificate,
+                module_b_mode=args.module_b_mode,
+                module_b_gate_mode=args.module_b_gate_mode,
+                w_max=args.w_max,
+                lambda_h=args.lambda_h,
+                hn_s0=args.hn_s0,
+                hn_th=args.hn_th,
+                wneg_stopgrad_q=args.wneg_stopgrad_q,
+                gate_stab_s0=args.gate_stab_s0,
+                gate_stab_tg=args.gate_stab_tg,
+                gate_stab_ema_rho=args.gate_stab_ema_rho,
             )
 
             epoch_list.append(epoch)
@@ -257,16 +287,19 @@ if __name__ == "__main__":
             empty_cluster = int((counts == 0).sum())
             min_cluster = int(counts.min()) if counts.size > 0 else 0
             route_line = (
-                f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only={int(args.route_uncertain_only)} "
+                f"ROUTE: epoch={epoch} module_b_mode={args.module_b_mode} gate_mode={args.module_b_gate_mode} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only={int(args.route_uncertain_only)} "
                 f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} alpha_fn={args.alpha_fn:.4f} pi_fn={args.pi_fn:.4f} "
-                f"w_min={args.w_min:.4f} hn_beta={args.hn_beta:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
+                f"w_min={args.w_min:.4f} w_max={args.w_max:.4f} hn_beta={args.hn_beta:.4f} lambda_h={args.lambda_h:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
                 f"HN_ratio={_rget(R, 'hn_ratio', 0.0):.4f} FN_count={_rget(R, 'FN_count', 0.0):.0f} HN_count={_rget(R, 'HN_count', 0.0):.0f} neg_count={_rget(R, 'neg_count', 0.0):.0f} safe_neg_count={_rget(R, 'safe_neg_count', 0.0):.0f} "
                 f"mean_s_post_FN={_rget(R, 'mean_s_post_fn', 0.0):.4f} mean_s_post_nonFN={_rget(R, 'mean_s_post_non_fn', 0.0):.4f} "
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
                 f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} "
-                f"tau_u={_rget(R, 'tau_u', 0.0):.4f} unsafe_ratio={_rget(R, 'unsafe_ratio', 0.0):.4f} theta_p50_batch={_rget(R, 'theta_p50_batch', 0.0):.4f}"
+                f"tau_u={_rget(R, 'tau_u', 0.0):.4f} unsafe_ratio={_rget(R, 'unsafe_ratio', 0.0):.4f} theta_p50_batch={_rget(R, 'theta_p50_batch', 0.0):.4f} "
+                f"w_neg_mean={_rget(R, 'w_neg_mean', 0.0):.4f} w_neg_p50={_rget(R, 'w_neg_p50', 0.0):.4f} w_neg_p90={_rget(R, 'w_neg_p90', 0.0):.4f} "
+                f"pij_mean_on_neg={_rget(R, 'pij_mean_on_neg', 0.0):.4f} hij_mean={_rget(R, 'hij_mean', 0.0):.4f} "
+                f"gate_stab={_rget(R, 'gate_stab', 0.0):.4f} stab_t={_rget(R, 'stab_t', 0.0):.4f} EMA_stab={_rget(R, 'EMA_stab', 0.0):.4f}"
             )
             logger.info(metric_line)
             logger.info(route_line)
@@ -383,6 +416,16 @@ if __name__ == "__main__":
                 theta_temperature=args.theta_temperature,
                 theta_threshold=args.theta_threshold,
                 enable_theta_certificate=args.enable_theta_certificate,
+                module_b_mode=args.module_b_mode,
+                module_b_gate_mode=args.module_b_gate_mode,
+                w_max=args.w_max,
+                lambda_h=args.lambda_h,
+                hn_s0=args.hn_s0,
+                hn_th=args.hn_th,
+                wneg_stopgrad_q=args.wneg_stopgrad_q,
+                gate_stab_s0=args.gate_stab_s0,
+                gate_stab_tg=args.gate_stab_tg,
+                gate_stab_ema_rho=args.gate_stab_ema_rho,
             )
 
 
@@ -403,16 +446,19 @@ if __name__ == "__main__":
             empty_cluster = int((counts == 0).sum())
             min_cluster = int(counts.min()) if counts.size > 0 else 0
             route_line = (
-                f"ROUTE: epoch={epoch} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only={int(args.route_uncertain_only)} "
+                f"ROUTE: epoch={epoch} module_b_mode={args.module_b_mode} gate_mode={args.module_b_gate_mode} neg_mode={args.neg_mode} knn_neg_k={args.knn_neg_k} route_uncertain_only={int(args.route_uncertain_only)} "
                 f"U_size={int(_rget(R, 'U_size', 0))} neg_per_anchor={_rget(R, 'neg_per_anchor', _rget(R, 'N_size', 0.0)):.2f} alpha_fn={args.alpha_fn:.4f} pi_fn={args.pi_fn:.4f} "
-                f"w_min={args.w_min:.4f} hn_beta={args.hn_beta:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
+                f"w_min={args.w_min:.4f} w_max={args.w_max:.4f} hn_beta={args.hn_beta:.4f} lambda_h={args.lambda_h:.4f} FN_ratio={_rget(R, 'fn_ratio', 0.0):.4f} safe_ratio={_rget(R, 'safe_ratio', 0.0):.4f} "
                 f"HN_ratio={_rget(R, 'hn_ratio', 0.0):.4f} FN_count={_rget(R, 'FN_count', 0.0):.0f} HN_count={_rget(R, 'HN_count', 0.0):.0f} neg_count={_rget(R, 'neg_count', 0.0):.0f} safe_neg_count={_rget(R, 'safe_neg_count', 0.0):.0f} "
                 f"mean_s_post_FN={_rget(R, 'mean_s_post_fn', 0.0):.4f} mean_s_post_nonFN={_rget(R, 'mean_s_post_non_fn', 0.0):.4f} "
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
                 f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} "
-                f"tau_u={_rget(R, 'tau_u', 0.0):.4f} unsafe_ratio={_rget(R, 'unsafe_ratio', 0.0):.4f} theta_p50_batch={_rget(R, 'theta_p50_batch', 0.0):.4f}"
+                f"tau_u={_rget(R, 'tau_u', 0.0):.4f} unsafe_ratio={_rget(R, 'unsafe_ratio', 0.0):.4f} theta_p50_batch={_rget(R, 'theta_p50_batch', 0.0):.4f} "
+                f"w_neg_mean={_rget(R, 'w_neg_mean', 0.0):.4f} w_neg_p50={_rget(R, 'w_neg_p50', 0.0):.4f} w_neg_p90={_rget(R, 'w_neg_p90', 0.0):.4f} "
+                f"pij_mean_on_neg={_rget(R, 'pij_mean_on_neg', 0.0):.4f} hij_mean={_rget(R, 'hij_mean', 0.0):.4f} "
+                f"gate_stab={_rget(R, 'gate_stab', 0.0):.4f} stab_t={_rget(R, 'stab_t', 0.0):.4f} EMA_stab={_rget(R, 'EMA_stab', 0.0):.4f}"
             )
             logger.info(metric_line)
             logger.info(route_line)

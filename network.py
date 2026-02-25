@@ -49,11 +49,7 @@ class Network(nn.Module):
                  uncertainty_mode='log_odds',
                  uncertainty_kappa=1.0,
                  uncertainty_temperature=0.5,
-                 reliability_temperature=0.5,
-                 uncertainty_alpha=1.0,
-                 uncertainty_beta=1.0,
-                 uncertainty_eta=1.0,
-                 uncertainty_time_momentum=0.9):
+                 reliability_temperature=0.5):
 
         super(Network, self).__init__()
         self.encoders = []
@@ -76,17 +72,9 @@ class Network(nn.Module):
         self.uncertainty_kappa = uncertainty_kappa
         self.uncertainty_temperature = uncertainty_temperature
         self.reliability_temperature = reliability_temperature
-        self.uncertainty_alpha = uncertainty_alpha
-        self.uncertainty_beta = uncertainty_beta
-        self.uncertainty_eta = uncertainty_eta
-        self.uncertainty_time_momentum = uncertainty_time_momentum
         self.step = 0
         self.psedo_labels = torch.zeros(num_samples, dtype=torch.long)
         self.weights = nn.Parameter(torch.full((self.num_views,), 1 / self.num_views), requires_grad=True)
-
-        # 模块A（时间稳定证据）：按样本索引维护全局 EMA 后验 q_bar
-        self.register_buffer('ema_q', torch.zeros(num_samples, num_clusters, dtype=torch.float32))
-        self.register_buffer('ema_q_valid', torch.zeros(num_samples, dtype=torch.bool))
 
         # —— 模块1：簇中心与带宽 σ存储 ——
         self.centers = [None] * (self.num_views + 1)
@@ -243,20 +231,13 @@ class Network(nn.Module):
         membership = unnorm / (unnorm.sum(dim=1, keepdim=True) + 1e-12)
         return membership
 
-    def _kl_div(self, q_a, q_b):
-        q_a = q_a.clamp(min=self.eps)
-        q_b = q_b.clamp(min=self.eps)
-        return torch.sum(q_a * (torch.log(q_a) - torch.log(q_b)), dim=1)
-
-    def estimate_uncertainty(self, memberships, common_z, sample_idx=None, update_ema=True, return_parts=False):
+    def estimate_uncertainty(self, memberships, common_z):
         """
         SCE 不确定度：
         - legacy: 熵 + Top-2 gap + max-view 融合（原路径）
-        - log_odds: 基于 log-odds margin + 可靠性加权跨视图融合
-        - posterior_evidence: 模块A，融合 margin + 视角KL一致性 + 时间EMA一致性
+        - log_odds: 方案A，基于 log-odds margin + 可靠性加权跨视图融合（推荐）
         """
         V = self.num_views
-        q_cons = memberships[V]
 
         if self.uncertainty_mode == 'legacy':
             u_vs = []
@@ -273,14 +254,6 @@ class Network(nn.Module):
             u_stack = torch.stack(u_vs, dim=1)
             u = u_stack.max(dim=1).values
             u_hat = self.mlp_uncert(common_z).squeeze(1)
-            aux = {
-                'gamma': torch.zeros_like(u),
-                'd_view': torch.zeros_like(u),
-                'd_time': torch.zeros_like(u),
-                'q_cons': q_cons,
-            }
-            if return_parts:
-                return u, u_hat, aux
             return u, u_hat
 
         # 方案A：log-odds margin -> sigmoid，跨视图用可靠性 softmax 融合
@@ -299,53 +272,7 @@ class Network(nn.Module):
         view_weights = torch.softmax(gamma_stack / max(self.reliability_temperature, self.eps), dim=1)
         u = (view_weights * u_stack).sum(dim=1)
 
-        if self.uncertainty_mode == 'log_odds':
-            u_hat = self.mlp_uncert(common_z).squeeze(1)
-            aux = {
-                'gamma': gamma_stack.mean(dim=1),
-                'd_view': torch.zeros_like(u),
-                'd_time': torch.zeros_like(u),
-                'q_cons': q_cons,
-            }
-            if return_parts:
-                return u, u_hat, aux
-            return u, u_hat
-
-        # 模块A：ν_i = sigmoid( α(κ-γ_i) + β d_view + η d_time )
-        top2_cons = torch.topk(q_cons, 2, dim=1).values
-        gamma = torch.log((top2_cons[:, 0] + self.eps) / (top2_cons[:, 1] + self.eps))
-
-        d_view = torch.zeros_like(gamma)
-        for v in range(V):
-            d_view += self._kl_div(memberships[v], q_cons)
-        d_view = d_view / max(float(V), 1.0)
-
-        d_time = torch.zeros_like(gamma)
-        if sample_idx is not None:
-            idx = sample_idx.to(q_cons.device).long()
-            q_detached = q_cons.detach()
-            valid = self.ema_q_valid[idx]
-
-            if valid.any():
-                d_time_valid = self._kl_div(q_cons[valid], self.ema_q[idx[valid]])
-                d_time[valid] = d_time_valid
-
-            if update_ema:
-                if (~valid).any():
-                    init_idx = idx[~valid]
-                    self.ema_q[init_idx] = q_detached[~valid]
-                    self.ema_q_valid[init_idx] = True
-                if valid.any():
-                    old_q = self.ema_q[idx[valid]]
-                    m = self.uncertainty_time_momentum
-                    self.ema_q[idx[valid]] = m * old_q + (1.0 - m) * q_detached[valid]
-
-        evidence = self.uncertainty_alpha * (self.uncertainty_kappa - gamma) + self.uncertainty_beta * d_view + self.uncertainty_eta * d_time
-        u = torch.sigmoid(evidence / max(self.uncertainty_temperature, self.eps))
         u_hat = self.mlp_uncert(common_z).squeeze(1)
-        aux = {'gamma': gamma, 'd_view': d_view, 'd_time': d_time, 'q_cons': q_cons}
-        if return_parts:
-            return u, u_hat, aux
         return u, u_hat
 
     def classify_fn_hn(self,
@@ -479,3 +406,4 @@ class Network(nn.Module):
         # 6) 计算最终一致性分数 S_ij
         S = torch.min(weighted_p_view_max, p_c)  # (N, N)
         return S
+

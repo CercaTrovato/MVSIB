@@ -39,22 +39,14 @@ parser.add_argument('--membership_mode', default='softmax_distance', type=str,
 parser.add_argument('--membership_temperature', default=1.0, type=float,
                     help='Temperature T_m for softmax-distance membership.')
 parser.add_argument('--uncertainty_mode', default='log_odds', type=str,
-                    choices=['legacy', 'log_odds', 'posterior_evidence'],
-                    help='Uncertainty mode: legacy / log_odds / posterior_evidence (Module-A).')
+                    choices=['legacy', 'log_odds'],
+                    help='Uncertainty mode: legacy entropy/top2 or improved log-odds margin.')
 parser.add_argument('--uncertainty_kappa', default=1.0, type=float,
                     help='Margin threshold kappa in u=Sigmoid((kappa-gamma)/T_u).')
 parser.add_argument('--uncertainty_temperature', default=0.5, type=float,
                     help='Temperature T_u for uncertainty sigmoid mapping.')
 parser.add_argument('--reliability_temperature', default=0.5, type=float,
                     help='Temperature T_w for reliability-weighted view fusion.')
-parser.add_argument('--uncertainty_alpha', default=1.0, type=float,
-                    help='Module-A weight alpha for margin evidence.')
-parser.add_argument('--uncertainty_beta', default=1.0, type=float,
-                    help='Module-A weight beta for cross-view KL evidence.')
-parser.add_argument('--uncertainty_eta', default=1.0, type=float,
-                    help='Module-A weight eta for EMA-time KL evidence.')
-parser.add_argument('--uncertainty_time_momentum', default=0.9, type=float,
-                    help='EMA momentum m for per-sample posterior buffer in Module-A.')
 parser.add_argument('--neg_mode', default='batch', type=str, choices=['batch', 'knn'],
                     help='Negative candidate mode for pair-wise FN risk routing.')
 parser.add_argument('--knn_neg_k', default=20, type=int,
@@ -75,20 +67,6 @@ parser.add_argument('--save_debug_npz', default=True, type=lambda x: x.lower()==
                     help='Save debug npz dump periodically.')
 parser.add_argument('--debug_dir', default='debug', type=str,
                     help='Directory to save debug npz files.')
-parser.add_argument('--u_threshold_method', default='otsu', type=str, choices=['otsu'],
-                    help='Adaptive threshold method for uncertain set in Module-A.')
-parser.add_argument('--u_tau_ema_rho', default=0.9, type=float,
-                    help='EMA smoothing rho for batch-level adaptive tau_u.')
-parser.add_argument('--min_uncertain_ratio', default=0.02, type=float,
-                    help='Lower bound ratio for uncertain set size safeguard.')
-parser.add_argument('--max_uncertain_ratio', default=0.6, type=float,
-                    help='Upper bound ratio for uncertain set size safeguard.')
-parser.add_argument('--theta_temperature', default=0.5, type=float,
-                    help='Temperature in theta_i certificate exp(sim/tau).')
-parser.add_argument('--theta_threshold', default=0.5, type=float,
-                    help='Unsafe certificate threshold Theta for forcing into U_t.')
-parser.add_argument('--enable_theta_certificate', default=True, type=lambda x: x.lower()=='true',
-                    help='Enable theta_i safety certificate to expand uncertain set.')
 args = parser.parse_args()
 
 
@@ -172,10 +150,6 @@ if __name__ == "__main__":
         uncertainty_kappa=args.uncertainty_kappa,
         uncertainty_temperature=args.uncertainty_temperature,
         reliability_temperature=args.reliability_temperature,
-        uncertainty_alpha=args.uncertainty_alpha,
-        uncertainty_beta=args.uncertainty_beta,
-        uncertainty_eta=args.uncertainty_eta,
-        uncertainty_time_momentum=args.uncertainty_time_momentum,
     ).to(device)
 
     optimizer = torch.optim.Adam(
@@ -227,13 +201,6 @@ if __name__ == "__main__":
                 knn_neg_k=args.knn_neg_k,
                 route_uncertain_only=args.route_uncertain_only,
                 y_prev_labels=y_prev,
-                u_threshold_method=args.u_threshold_method,
-                u_tau_ema_rho=args.u_tau_ema_rho,
-                min_uncertain_ratio=args.min_uncertain_ratio,
-                max_uncertain_ratio=args.max_uncertain_ratio,
-                theta_temperature=args.theta_temperature,
-                theta_threshold=args.theta_threshold,
-                enable_theta_certificate=args.enable_theta_certificate,
             )
 
             epoch_list.append(epoch)
@@ -265,8 +232,7 @@ if __name__ == "__main__":
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
-                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} "
-                f"tau_u={_rget(R, 'tau_u', 0.0):.4f} unsafe_ratio={_rget(R, 'unsafe_ratio', 0.0):.4f} theta_p50_batch={_rget(R, 'theta_p50_batch', 0.0):.4f}"
+                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f}"
             )
             logger.info(metric_line)
             logger.info(route_line)
@@ -376,13 +342,6 @@ if __name__ == "__main__":
                 knn_neg_k=args.knn_neg_k,
                 route_uncertain_only=args.route_uncertain_only,
                 y_prev_labels=y_prev,
-                u_threshold_method=args.u_threshold_method,
-                u_tau_ema_rho=args.u_tau_ema_rho,
-                min_uncertain_ratio=args.min_uncertain_ratio,
-                max_uncertain_ratio=args.max_uncertain_ratio,
-                theta_temperature=args.theta_temperature,
-                theta_threshold=args.theta_threshold,
-                enable_theta_certificate=args.enable_theta_certificate,
             )
 
 
@@ -411,8 +370,7 @@ if __name__ == "__main__":
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
-                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} "
-                f"tau_u={_rget(R, 'tau_u', 0.0):.4f} unsafe_ratio={_rget(R, 'unsafe_ratio', 0.0):.4f} theta_p50_batch={_rget(R, 'theta_p50_batch', 0.0):.4f}"
+                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f}"
             )
             logger.info(metric_line)
             logger.info(route_line)

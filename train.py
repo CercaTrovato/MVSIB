@@ -67,6 +67,9 @@ parser.add_argument('--save_debug_npz', default=True, type=lambda x: x.lower()==
                     help='Save debug npz dump periodically.')
 parser.add_argument('--debug_dir', default='debug', type=str,
                     help='Directory to save debug npz files.')
+parser.add_argument('--analysis_dir', default='error_analysis', type=str)
+parser.add_argument('--minority_threshold', default=50, type=int)
+parser.add_argument('--analysis_knn_k', default=10, type=int)
 args = parser.parse_args()
 
 
@@ -104,6 +107,37 @@ def _save_debug_npz(debug_path, dump_dict, cluster_sizes, empty_cluster_count, m
     for lk, lv in loss_dict.items():
         arrays[lk] = np.asarray(lv)
     np.savez_compressed(debug_path, **arrays)
+
+
+def _save_best_analysis_outputs(analysis_dir, pretrain_commonz, best_analysis):
+    os.makedirs(analysis_dir, exist_ok=True)
+    np.save(os.path.join(analysis_dir, 'pretrain_commonZ.npy'), pretrain_commonz)
+    np.save(os.path.join(analysis_dir, 'best_commonZ.npy'), best_analysis['commonZ'])
+
+    pcm = best_analysis['per_class_metrics']
+    per_class_matrix = np.column_stack([
+        pcm['class_id'], pcm['support'], pcm['precision'], pcm['recall'], pcm['f1'],
+        pcm['fn_ratio'], pcm['hn_ratio'], pcm['absorbed_majority_ratio'], pcm['centroid_drift']
+    ])
+    np.savetxt(
+        os.path.join(analysis_dir, 'best_per_class_metrics.csv'),
+        per_class_matrix,
+        delimiter=',',
+        header='class_id,support,precision,recall,f1,fn_ratio,hn_ratio,absorbed_majority_ratio,centroid_drift',
+        comments=''
+    )
+    np.savetxt(
+        os.path.join(analysis_dir, 'best_confusion_matrix.csv'),
+        best_analysis['confusion_matrix'],
+        delimiter=',',
+        fmt='%d'
+    )
+    np.savetxt(
+        os.path.join(analysis_dir, 'best_cluster_class_alignment_matrix.csv'),
+        best_analysis['alignment_matrix'],
+        delimiter=',',
+        fmt='%d'
+    )
 
 def set_seed(seed):
     np.random.seed(seed)
@@ -170,10 +204,12 @@ if __name__ == "__main__":
     totalloss_list = []
     pre_train(network, mv_data, args.batch_size,
               args.mse_epochs, optimizer)
+    _, pretrain_commonz = extract_commonz_and_labels(network, mv_data, num_samples)
 
     best_acc = 0
     best_epoch = -1
     best_metrics = None
+    best_analysis = None
     acc_list, nmi_list, pur_list, ari_list, f1_list = [], [], [], [], []
 
     if not args.large_datasets:
@@ -208,6 +244,13 @@ if __name__ == "__main__":
 
             # 每轮评估
             acc, nmi, pur, ari, f_score = valid(network, mv_data, num_samples, num_clusters)
+            class_analysis = run_epoch_class_analysis(
+                network, mv_data, num_samples, num_clusters,
+                pretrain_commonz,
+                minority_threshold=args.minority_threshold,
+                analysis_knn_k=args.analysis_knn_k,
+            )
+            A = class_analysis['summary']
             logger.info(f"ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f}")
             print(f"[Epoch {epoch}] ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f}")
 
@@ -218,7 +261,9 @@ if __name__ == "__main__":
                 f"METRIC: epoch={epoch} step={epoch} ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f} "
                 f"gate={train_out['gate']:.4f} lr={lr:.6g} temp_f={args.temperature_f:.4f} temp_l={args.temperature_l:.4f} "
                 f"L_total={L['L_total']:.6f} L_recon={L['L_recon']:.6f} L_feat={L['L_feat']:.6f} L_cross={L['L_cross']:.6f} "
-                f"L_cluster={L['L_cluster']:.6f} L_uncert={L['L_uncert']:.6f} L_hn={L['L_hn']:.6f} L_reg={L['L_reg']:.6f}"
+                f"L_cluster={L['L_cluster']:.6f} L_uncert={L['L_uncert']:.6f} L_hn={L['L_hn']:.6f} L_reg={L['L_reg']:.6f} "
+                f"macro_F1={A['macro_F1']:.6f} minority_recall_mean={A['minority_recall_mean']:.6f} minority_f1_mean={A['minority_f1_mean']:.6f} "
+                f"minority_absorption_mean={A['minority_absorption_mean']:.6f} minority_centroid_drift_mean={A['minority_centroid_drift_mean']:.6f}"
             )
             counts = np.bincount(network.psedo_labels.detach().cpu().numpy(), minlength=num_clusters)
             empty_cluster = int((counts == 0).sum())
@@ -232,7 +277,9 @@ if __name__ == "__main__":
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
-                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f}"
+                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} "
+                f"minority_FN_ratio_mean={A['minority_FN_ratio_mean']:.6f} minority_HN_ratio_mean={A['minority_HN_ratio_mean']:.6f} "
+                f"worst3_f1_mean={A['worst3_f1_mean']:.6f} top3_FN_mean={A['top3_FN_mean']:.6f} top3_HN_mean={A['top3_HN_mean']:.6f}"
             )
             logger.info(metric_line)
             logger.info(route_line)
@@ -282,6 +329,7 @@ if __name__ == "__main__":
                 best_acc = acc
                 best_epoch = epoch
                 best_metrics = (acc, nmi, pur, ari, f_score)
+                best_analysis = class_analysis
 
         avg_acc = sum(acc_list) / len(acc_list)
         avg_nmi = sum(nmi_list) / len(nmi_list)
@@ -317,6 +365,8 @@ if __name__ == "__main__":
             torch.save({
                 'network_state_dict': network.state_dict(),
             }, f'./models/{args.dataset}_complete_model.pth')
+        if best_analysis is not None:
+            _save_best_analysis_outputs(args.analysis_dir, pretrain_commonz, best_analysis)
     else:
         best_acc = 0
         best_epoch = -1
@@ -346,6 +396,13 @@ if __name__ == "__main__":
 
 
             acc, nmi, pur, ari, f_score = valid(network, mv_data, num_samples, num_clusters)
+            class_analysis = run_epoch_class_analysis(
+                network, mv_data, num_samples, num_clusters,
+                pretrain_commonz,
+                minority_threshold=args.minority_threshold,
+                analysis_knn_k=args.analysis_knn_k,
+            )
+            A = class_analysis['summary']
             logger.info(f"ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f}")
             print(f"[Epoch {epoch}] ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f}")
 
@@ -356,7 +413,9 @@ if __name__ == "__main__":
                 f"METRIC: epoch={epoch} step={epoch} ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f} "
                 f"gate={train_out['gate']:.4f} lr={lr:.6g} temp_f={args.temperature_f:.4f} temp_l={args.temperature_l:.4f} "
                 f"L_total={L['L_total']:.6f} L_recon={L['L_recon']:.6f} L_feat={L['L_feat']:.6f} L_cross={L['L_cross']:.6f} "
-                f"L_cluster={L['L_cluster']:.6f} L_uncert={L['L_uncert']:.6f} L_hn={L['L_hn']:.6f} L_reg={L['L_reg']:.6f}"
+                f"L_cluster={L['L_cluster']:.6f} L_uncert={L['L_uncert']:.6f} L_hn={L['L_hn']:.6f} L_reg={L['L_reg']:.6f} "
+                f"macro_F1={A['macro_F1']:.6f} minority_recall_mean={A['minority_recall_mean']:.6f} minority_f1_mean={A['minority_f1_mean']:.6f} "
+                f"minority_absorption_mean={A['minority_absorption_mean']:.6f} minority_centroid_drift_mean={A['minority_centroid_drift_mean']:.6f}"
             )
             counts = np.bincount(network.psedo_labels.detach().cpu().numpy(), minlength=num_clusters)
             empty_cluster = int((counts == 0).sum())
@@ -370,7 +429,9 @@ if __name__ == "__main__":
                 f"delta_post={_rget(R, 'delta_post', 0.0):.4f} mean_sim_HN={_rget(R, 'mean_sim_hn', 0.0):.4f} mean_sim_safe_nonHN={_rget(R, 'mean_sim_safe_non_hn', 0.0):.4f} "
                 f"delta_sim={_rget(R, 'delta_sim', 0.0):.4f} label_flip={_rget(R, 'label_flip', 0.0):.4f} stab_rate={_rget(R, 'stab_rate', 0.0):.4f} "
                 f"empty_cluster={empty_cluster} min_cluster={min_cluster} denom_fn_share={_rget(R, 'denom_fn_share', 0.0):.4f} denom_safe_share={_rget(R, 'denom_safe_share', 0.0):.4f} "
-                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f}"
+                f"w_hit_min_ratio={_rget(R, 'w_hit_min_ratio', 0.0):.4f} w_mean_on_FN={_rget(R, 'w_mean_on_FN', 0.0):.4f} w_mean_on_safe={_rget(R, 'w_mean_on_safe', 0.0):.4f} "
+                f"minority_FN_ratio_mean={A['minority_FN_ratio_mean']:.6f} minority_HN_ratio_mean={A['minority_HN_ratio_mean']:.6f} "
+                f"worst3_f1_mean={A['worst3_f1_mean']:.6f} top3_FN_mean={A['top3_FN_mean']:.6f} top3_HN_mean={A['top3_HN_mean']:.6f}"
             )
             logger.info(metric_line)
             logger.info(route_line)
@@ -420,6 +481,7 @@ if __name__ == "__main__":
                 best_acc = acc
                 best_epoch = epoch
                 best_metrics = (acc, nmi, pur, ari, f_score)
+                best_analysis = class_analysis
 
         avg_acc = sum(acc_list) / len(acc_list)
         avg_nmi = sum(nmi_list) / len(nmi_list)
@@ -444,3 +506,5 @@ if __name__ == "__main__":
             print(f"\n Best Evaluation (Epoch {best_epoch}):")
             print('ACC = {:.4f} NMI = {:.4f} PUR = {:.4f} ARI = {:.4f} F1 = {:.4f}'.format(
                 acc, nmi, pur,    ari, f_score))
+        if best_analysis is not None:
+            _save_best_analysis_outputs(args.analysis_dir, pretrain_commonz, best_analysis)

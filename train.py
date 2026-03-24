@@ -13,37 +13,23 @@ import numpy as np
 
 Dataname = 'RGB-D'
 parser = argparse.ArgumentParser(description='train')
-# =========================
-# 基础实验配置
-# =========================
 parser.add_argument('--dataset', default=Dataname,
                     help='[CCV, RGB-D, Cora, Hdigit, prokaryotic]')
 parser.add_argument('--save_model', default=False, help='Saving the model after training.')
 parser.add_argument('--batch_size', default=256, type=int)
-# temperature_f: 特征级对比温度；小->判别更尖锐，大->训练更平滑稳定
 parser.add_argument("--temperature_f", default=0.5, type=float)
-# temperature_l: 簇级对比温度；小->簇中心对比更强，大->对噪声更鲁棒
 parser.add_argument("--temperature_l", default=0.5, type=float)
-# learning_rate: 学习率；大->收敛快但不稳，小->稳但慢
 parser.add_argument("--learning_rate", default=0.0001, type=float)
-# weight_decay: L2 正则；大->更强抑制过拟合，但可能欠拟合
 parser.add_argument("--weight_decay", default=0.0, type=float)
-# mse_epochs: Warm-up 重建阶段轮数；大->编码器更稳，耗时更长
 parser.add_argument("--mse_epochs", default=200, type=int)
-# con_epochs: 对比主训练轮数；大->有机会更优，也可能过拟合
 parser.add_argument("--con_epochs", default=100, type=int)
-# feature_dim: 潜在空间维度；大->表达力强但风险过拟合/计算增大
 parser.add_argument("--feature_dim", default =256, type=int)
 parser.add_argument("--large_datasets", default=False, type=lambda x: x.lower()=='true')
-# k: kNN 图邻居数；大->图更稠密，小->更局部
 parser.add_argument("--k", default=5, type=int)
 parser.add_argument('--gpu', default='0', type=str, help='GPU device idx.')
 # 以下是我们新增的动态策略超参
-# warmup_epochs: 预留阶段控制超参（用于兼容旧实验配置）
 parser.add_argument('--warmup_epochs', default=20, type=int)
-# lambda_u: 不确定度回归损失权重；大->u_hat 更贴近 u
 parser.add_argument('--lambda_u', default=0.1, type=float)
-# lambda_hn_penalty: HN push/pull 约束权重；大->更强负样本分离
 parser.add_argument('--lambda_hn_penalty',type=float,default=0.1)
 parser.add_argument('--cross_warmup_epochs', default=50, type=int,
                     help='Epoch to start cross-view weighted consistency loss (Stage-3).')
@@ -90,24 +76,20 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def _qstats(x):
-    # 返回分位数与均值方差，便于做分布诊断日志
     x = np.asarray(x).reshape(-1)
     if x.size == 0:
         return (0.0, 0.0, 0.0, 0.0, 0.0)
     return (float(np.quantile(x, 0.1)), float(np.quantile(x, 0.5)), float(np.quantile(x, 0.9)), float(np.mean(x)), float(np.std(x)))
 
 def _to_np(v):
-    # 统一把 tensor / list / scalar 转成 numpy
     if hasattr(v, 'detach'):
         return v.detach().cpu().numpy()
     return np.asarray(v)
 
 def _rget(route, key, default=0.0):
-    # 安全读取路由字典字段（缺失则回落 default）
     return route[key] if key in route else default
 
 def _save_debug_npz(debug_path, dump_dict, cluster_sizes, empty_cluster_count, min_cluster_size, gate_value, loss_dict):
-    # 将中间诊断张量序列化到 .npz，便于离线分析
     os.makedirs(os.path.dirname(debug_path), exist_ok=True)
     arrays = {}
     for k, v in dump_dict.items():
@@ -124,7 +106,6 @@ def _save_debug_npz(debug_path, dump_dict, cluster_sizes, empty_cluster_count, m
     np.savez_compressed(debug_path, **arrays)
 
 def set_seed(seed):
-    # 统一随机种子：确保复现实验（numpy / random / torch）
     np.random.seed(seed)
     random.seed(seed)
 
@@ -136,7 +117,7 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 if __name__ == "__main__":
-    # — 数据集特定超参（保留原基线设置） —
+    # — 数据集特定超参 —
     if args.dataset == "CCV":
         args.seed, args.k, alpha, beta = 10, 10, 0.0001, 0.001
         args.seed, args.k, alpha, beta = 10, 4, 0.01, 0.1
@@ -154,14 +135,12 @@ if __name__ == "__main__":
     print("==================================\nArgs:{}\n==================================".format(args))
     set_seed(args.seed)
     # — 准备数据和模型 —
-    # mv_data: 多视图数据对象，包含 data_views 与 labels
     mv_data = MultiviewData(args.dataset, device)
     num_views = len(mv_data.data_views)
     num_samples = mv_data.labels.size
     num_clusters = int(np.unique(mv_data.labels).size)
     input_sizes = [mv_data.data_views[i].shape[1] for i in range(num_views)]
 
-    # 网络实例：包含多视图编码器、融合、中心更新、不确定度模块等
     network = Network(
         num_views, num_samples, num_clusters, device,
         input_sizes, args.feature_dim,
@@ -173,14 +152,12 @@ if __name__ == "__main__":
         reliability_temperature=args.reliability_temperature,
     ).to(device)
 
-    # 优化器：统一更新 network 全部可学习参数
     optimizer = torch.optim.Adam(
         list(network.parameters()),
         lr=args.learning_rate,
         weight_decay=args.weight_decay
     )
 
-    # 损失模块：封装 feature/cluster/uncertainty/cross-view 等损失
     mvc_loss = Loss(args.batch_size, num_clusters,
                     args.temperature_l, args.temperature_f).to(device)
 
@@ -189,7 +166,6 @@ if __name__ == "__main__":
     logger.info("Args: " + str(args))
 
     # — Warm-up 预训练 —
-    # 仅优化重建项，先稳定视图编码器表示
     epoch_list = []
     totalloss_list = []
     pre_train(network, mv_data, args.batch_size,
@@ -206,7 +182,6 @@ if __name__ == "__main__":
         y_prev = None
 
         for epoch in range(1, args.con_epochs + 1):
-            # y_prev: 上一轮全量伪标签，用于 label stability 统计
             y_prev = network.psedo_labels.clone() if epoch > 1 else None
             train_out = contrastive_train(
                 network, mv_data, mvc_loss,
@@ -231,7 +206,7 @@ if __name__ == "__main__":
             epoch_list.append(epoch)
             totalloss_list.append(train_out['loss']['L_total'])
 
-            # 每轮评估：在全数据上计算聚类指标（ACC/NMI/PUR/ARI/F1）
+            # 每轮评估
             acc, nmi, pur, ari, f_score = valid(network, mv_data, num_samples, num_clusters)
             logger.info(f"ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f}")
             print(f"[Epoch {epoch}] ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f}")

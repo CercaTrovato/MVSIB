@@ -4,34 +4,10 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import numpy as np
 
-# ============================================================================
-# model.py
-# ----------------------------------------------------------------------------
-# 本文件负责“算法流程层”的实现（不是网络结构层）：
-# 1) 构图（kNN graph）与批内邻接关系
-# 2) E-step 伪标签更新
-# 3) Warm-up 重建预训练
-# 4) 对比学习主训练（包含 FN/HN 路由、不确定课程、门控）
-#
-# 说明：
-# - 为保证研究可复现，本文件保留了原有训练框架与关键机制；
-# - 注释重点说明每个代码块的功能、变量语义、以及超参数调节影响。
-# ============================================================================
-
 
 
 # 2.1 get_knn_graph：对应论文第 4.1 节“构建最近邻图 G”（Eq.(8)）
 def get_knn_graph(data, k):
-    """
-    在一个 batch 内根据欧氏距离构建 kNN 邻接矩阵。
-
-    参数:
-    - data: Tensor[N, D]，N 为样本数，D 为特征维度。
-    - k: 邻居数量（含自身后会在实现中去掉 self）。
-         k 大：图更稠密，局部结构更平滑；k 小：更局部但可能噪声敏感。
-    返回:
-    - result_graph: Tensor[N, N]，0/1 对称邻接矩阵。
-    """
     num_samples = data.size(0)
     graph = torch.zeros(num_samples, num_samples, dtype=torch.int32, device=data.device)
 
@@ -49,9 +25,6 @@ def get_knn_graph(data, k):
 
 # 2.2 get_W：为每个视图、每个 batch 预先计算邻接矩阵，对应 Fine-tuning 阶段特征对比里所需的G(v)
 def get_W(mv_data, k):
-    """
-    为每个视图预先构建 batch 级邻接图缓存 W。
-    """
     W = []
     mv_data_loader, num_views, num_samples, _ = get_all_multiview_data(mv_data)
     for _, (sub_data_views, _, _) in enumerate(mv_data_loader):
@@ -65,9 +38,6 @@ def get_W(mv_data, k):
 # model.py
 
 def psedo_labeling(model, dataset, batch_size):
-    """
-    E-step：在全数据上前向得到 common_z，并执行聚类更新 model.psedo_labels。
-    """
     loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
@@ -91,9 +61,6 @@ def psedo_labeling(model, dataset, batch_size):
 
 # 2.4 pre_train：对应论文 “Warm-up 阶段”（Eq.(12)）
 def pre_train(model, mv_data, batch_size, epochs, optimizer):
-    """
-    Warm-up 阶段：仅优化重建损失（MSE），稳定各视图编码器。
-    """
     mv_data_loader, num_views, num_samples, _ = get_multiview_data(mv_data, batch_size)
 
     pre_train_loss_values = np.zeros(epochs + 1, dtype=np.float64)
@@ -127,24 +94,6 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
     Design 1': pair-wise FN risk routing.
     - 对 negative pair (i,j) 估计 FN 风险并在 InfoNCE 分母软降权
     - 在可信 negatives 中按分位数选择 hard negatives（eta 矩阵）
-
-    关键输入变量（首次出现解释）:
-    - common_z: Tensor[N,D]，共识特征。
-    - memberships_cons: Tensor[N,L]，共识空间簇隶属度。
-    - u_hat: Tensor[N]，模型预测不确定度。
-    - batch_labels: Tensor[N]，当前批伪标签。
-    - prev_labels_batch: Tensor[N] or None，上轮伪标签（用于稳定性估计）。
-    - gate_val: float，课程门控强度（通常随 epoch 递增）。
-    - uncertain_mask: Tensor[N] or None，仅对不确定样本启用路由时使用。
-
-    关键超参数影响:
-    - alpha_fn: FN 风险分位阈值比例。越大 -> 标记 FN 的 pair 越多（更保守）。
-    - pi_fn: FN pair 降权强度系数。越大 -> FN 在分母中贡献更小。
-    - w_min: FN 最小负权重下界，防止权重塌缩到 0。
-    - hn_beta: safe negatives 中选 HN 的分位比例。越大 -> HN 集合更大。
-    - neg_mode: 'batch' 用全批负样本；'knn' 仅在邻域中找负样本。
-    - knn_k: neg_mode='knn' 时邻居规模；越大覆盖更广、计算更重。
-    - eps: 数值稳定常数。
     """
     device = common_z.device
     N = common_z.size(0)
@@ -319,9 +268,6 @@ def contrastive_train(model, mv_data, mvc_loss,
                       y_prev_labels=None,
                       p_min=0.05,
                       u_min=32):
-    """
-    标准数据集主训练循环（Fine-tuning / contrastive stage）。
-    """
     model.train()
     mv_data_loader, num_views, num_samples, num_clusters = get_multiview_data(mv_data, batch_size)
 
@@ -370,7 +316,6 @@ def contrastive_train(model, mv_data, mvc_loss,
         batch_N  = u_hat.size(0)
 
         # ——— 4) 课程学习式不确定划分 ———
-        # k_unc: 本批不确定样本数 = max(下界, 按比例选择)
         k_unc = max(min(u_min, batch_N), int(batch_N * top_p_e))
         _, idx_topk = torch.topk(u_hat, k_unc, largest=True)
         uncertain_mask = torch.zeros(batch_N, dtype=torch.bool, device=device)
@@ -380,8 +325,6 @@ def contrastive_train(model, mv_data, mvc_loss,
         print(f"Batch {batch_idx}: uncertain {uncertain_mask.sum().item()}/{batch_N} = {uncertain_mask.sum().item()/batch_N:.2%}")
 
         # ——— 5) 动态门控 Gate ———
-        # gate_u: 由不确定度均值驱动（越不确定，越减弱 u 回归项）
-        # gate_fn/gate_hn/gate_val: 由训练进度 t 驱动（越后期越强）
         u_mean = u_hat.mean().item()
         mu_start, mu_end = 0.3, 0.7
         raw_gate = (u_mean - mu_start) / (mu_end - mu_start)
@@ -589,7 +532,6 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
     大数据集版 Contrastive Training：
     - k: 用于构建每个视图下的 k-NN 图
     - 其它参数含义同原版 contrastive_train
-    - 区别：W 不预计算，而是每个 batch 动态构建，节省内存
     """
     model.train()
     mv_loader, num_views, _, num_clusters = get_multiview_data(mv_data, batch_size)

@@ -2,53 +2,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ============================================================================
-# loss.py
-# ----------------------------------------------------------------------------
-# 本文件集中定义 MVSIB 的损失函数族：
-# 1) feature-level 对比损失（支持负样本软降权）
-# 2) cluster-level InfoNCE（支持少数簇伪样本增强）
-# 3) 不确定度回归损失
-# 4) 跨视图加权 InfoNCE
-#
-# 注：所有超参数均保留并在注释中说明调节影响，保证实验可对照。
-# ============================================================================
-
-
 class Loss(nn.Module):
     def __init__(self, batch_size, num_clusters, temperature_l, temperature_f,
                  R_max=1.0, margin=0.5, bound_weight=0.1,
                  global_minority_ratio=0.5, num_gmm_components=2, num_pseudo_samples=5,
                  mmd_weight=1.0, excl_weight=1.0, excl_sigma=2.0):
-        """
-        参数说明（含超参数影响）:
-        - batch_size: 训练批大小（主要用于外部流程，对损失逻辑本身无硬依赖）。
-        - num_clusters: 簇数 L。
-        - temperature_l: 簇级对比温度 T_l；小更尖锐，大更平滑。
-        - temperature_f: 特征级对比温度 T_f；小更强分离，大更稳定。
-        - R_max: 少数簇伪样本边界半径上限；小更严格约束伪样本不远离簇中心。
-        - margin: 边界间隔；大则更强调与其他簇保持距离。
-        - bound_weight: 边界约束权重；0 则关闭边界项。
-        - global_minority_ratio: 全局少数簇判定阈值比例（当前主路径保留接口）。
-        - num_gmm_components: GMM 组件数（当前实现保留超参位）。
-        - num_pseudo_samples: 每簇伪样本规模相关系数；大则伪样本方差更强。
-        - mmd_weight: MMD 对齐项权重。
-        - excl_weight: 伪样本排斥项权重。
-        - excl_sigma: RBF 核带宽；小更局部敏感，大更全局平滑。
-        """
         super(Loss, self).__init__()
         self.batch_size = batch_size
         self.num_clusters = num_clusters
         self.temperature_l = temperature_l
         self.temperature_f = temperature_f
         self.similarity = nn.CosineSimilarity(dim=2)
-
         # 边界约束超参
         self.R_max = R_max
         self.margin = margin
         self.bound_weight = bound_weight
 
-        # 全局少数判定超参（当前主要作为可扩展参数位）
+        # 全局少数判定超参
         self.global_minority_ratio = global_minority_ratio
 
         # GMM 伪样本生成超参
@@ -64,44 +34,46 @@ class Loss(nn.Module):
         self.register_buffer('loss_ema', torch.ones(3))
         self.ema_momentum = 0.9
         self.weight_alpha = 1.0
-
-        # 常用基础损失
+        # 损失函数实例
         self.mse = nn.MSELoss()
-        self.ce = nn.CrossEntropyLoss()
+        self.ce  = nn.CrossEntropyLoss()
 
     def feature_loss(self, zi, z, w, y_pse, neg_weights=None):
         """
-        特征级对比损失（单视图 zi 对共识 z）。
-
-        参数:
-        - zi: Tensor[N,D]，某视图的表示。
-        - z: Tensor[N,D]，共识表示 common_z。
-        - w: Tensor[N,N]，kNN 邻接掩码（0/1）。
-        - y_pse: Tensor[N,N]，由伪标签得到的同簇掩码（soft/float）。
-        - neg_weights: Tensor[N,N]，负样本软权重（FN 风险路由输出）。
-          若为 None，则退化为普通等权负样本。
+        zi: [N, D], z: [N, D]
+        w:  [N, N] integer mask (0/1)
+        y_pse: [N, N] float pseudo-label mask for positive pairs
+        neg_weights: [N, N] float weights for negative-pair denominator (Design 1').
         """
         N = z.size(0)
         device = zi.device
 
-        # 1) 计算视图-共识 与 视图-视图 的余弦相似度矩阵
-        cross_view_distance = self.similarity(zi.unsqueeze(1), z.unsqueeze(0)) / self.temperature_f
-        inter_view_distance = self.similarity(zi.unsqueeze(1), zi.unsqueeze(0)) / self.temperature_f
+        # —— 1) 计算距离矩阵 ——
+        cross_view_distance = self.similarity(
+            zi.unsqueeze(1),  # [N,1,D]
+            z.unsqueeze(0)  # [1,N,D]
+        ) / self.temperature_f  # → [N,N]
+        inter_view_distance = self.similarity(
+            zi.unsqueeze(1),
+            zi.unsqueeze(0)
+        ) / self.temperature_f  # → [N,N]
 
-        # 2) 构造正样本 mask（图邻接 + 对角自对）
-        w_bool = w.to(device).bool()
+        # —— 2) 构造正样本 mask ——
+        # 包含 w==1 的对，以及对角(自对)
+        w_bool = w.to(device).bool()  # [N,N]
         eye = torch.eye(N, dtype=torch.bool, device=device)
-        w_mask = w_bool | eye
+        w_mask = w_bool | eye  # [N,N] 布尔
 
-        # 3) y_pse 是软标签权重（同簇程度）
-        y_pse = y_pse.to(device).float()
+        # —— 3) 真实的“软”权重 y_pse ——
+        y_pse = y_pse.to(device).float()  # [N,N]
 
-        # 4) 正样本项
-        pos_mask = w_mask & (y_pse > 0)
+        # —— 4) positive loss ——
+        pos_mask = w_mask & (y_pse > 0)  # 只有 y_pse>0 才算正样本
+        # 按 y_pse 乘以距离
         positive_term = (pos_mask.float() * y_pse * cross_view_distance).sum()
-        positive_loss = -positive_term
+        positive_loss = -positive_term  # 保持原来 “-sum(...)”
 
-        # 5) 负样本项
+        # —— 5) negative loss ——
         neg_mask = (~w_mask) & (y_pse == 0)
         SMALL_NUM = torch.log(torch.tensor(1e-45, device=device))
 
@@ -115,15 +87,14 @@ class Loss(nn.Module):
         neg_inter = (neg_mask.float() * neg_weight_mat * inter_view_distance)
         neg_inter = neg_inter.masked_fill(neg_inter == 0, SMALL_NUM)
 
-        # 历史实现保留：拼接后再次按 temperature_f 缩放，保证与旧实验一致
+        # 拼到一起，再除一次 temperature（可根据实际 remove）
         neg_sim = torch.cat([neg_inter, neg_cross], dim=1) / self.temperature_f
         neg_loss = torch.logsumexp(neg_sim, dim=1).sum()
 
-        # 6) 按样本数归一化
+        # —— 6) 最终归一 ——
         return (positive_loss + neg_loss) / N
 
     def compute_mmd_loss(self, real, pseudo):
-        # MMD：约束伪样本分布贴近真实少数簇分布
         n, m = real.size(0), pseudo.size(0)
         if n < 2 or m < 2:
             return torch.tensor(0., device=real.device)
@@ -136,7 +107,6 @@ class Loss(nn.Module):
         return sum_xx + sum_yy - sum_xy
 
     def compute_exclusion_loss(self, pseudos):
-        # 排斥项：避免不同簇伪样本塌缩到一起
         k = pseudos.size(0)
         if k < 2:
             return torch.tensor(0., device=pseudos.device)
@@ -146,30 +116,29 @@ class Loss(nn.Module):
         return kr.sum()
 
     def compute_cluster_loss(self,
-                             q_centers,
-                             k_centers,
-                             psedo_labels_batch,
-                             features_batch=None,
+                             q_centers,  # [L, D]
+                             k_centers,  # [L, D]
+                             psedo_labels_batch,  # [B]
+                             features_batch=None,  # [B, D] or None
                              global_minority_mask=None,
                              return_mmd_excl=False):
         """
-        簇级损失主入口：
-        - baseline 分支：仅 cluster InfoNCE；
-        - minority-enhancement 分支：加入伪样本 + 边界 + MMD + exclusion。
+        如果 features_batch or global_minority_mask is None: 只做原始 InfoNCE（不带伪样本）。
+        否则：使用全局+批次判定少数簇，并用 GMM 拟合生成 num_pseudo_samples 个伪样本，再平均得到 ψ_k。
         """
         total_mmd = 0.0
         total_excl = 0.0
         device = q_centers.device
         L, D = q_centers.shape
 
-        # 基础簇间相似度矩阵 d_q
+        # 1) 计算基础相似度矩阵 d_q
         d_q_raw = q_centers.mm(q_centers.T)
         with torch.no_grad():
             d_kdiag = (q_centers * k_centers).sum(dim=1) / self.temperature_l
         I_L = torch.eye(L, device=device, dtype=d_q_raw.dtype)
         d_q = (d_q_raw / self.temperature_l) * (1 - I_L) + torch.diag(d_kdiag)
 
-        # baseline 分支
+        # 原始 InfoNCE 分支
         if features_batch is None or global_minority_mask is None:
             counts = torch.bincount(psedo_labels_batch, minlength=self.num_clusters).float()
             unique_labels = torch.unique(psedo_labels_batch)
@@ -188,7 +157,7 @@ class Loss(nn.Module):
             num_nonzero = L - zero_classes.numel()
             return torch.stack(losses).sum() / num_nonzero if num_nonzero > 0 else torch.tensor(0., device=device)
 
-        # minority-enhancement 分支
+        # ——————— 走伪样本分支 ———————
         counts = torch.bincount(psedo_labels_batch, minlength=self.num_clusters).float().to(device)
         unique_labels = torch.unique(psedo_labels_batch).to(device)
         mask_unique = torch.zeros(self.num_clusters, device=device, dtype=torch.bool)
@@ -199,7 +168,7 @@ class Loss(nn.Module):
         batch_minority_mask = batch_mask & global_mask
         minority_indices = batch_minority_mask.nonzero(as_tuple=False).view(-1)
 
-        # 伪样本生成
+        # 伪样本生成（GMM）
         pseudos = torch.zeros((L, D), device=device, dtype=q_centers.dtype)
         mu_minority = {}
         for k_tensor in minority_indices:
@@ -218,7 +187,7 @@ class Loss(nn.Module):
                 try:
                     mvn = torch.distributions.MultivariateNormal(mu_k, covariance_matrix=cov_p)
                     pseudos[k] = mvn.rsample()
-                except Exception:
+                except:
                     pseudos[k] = k_centers[k]
 
         # 边界约束
@@ -240,7 +209,6 @@ class Loss(nn.Module):
             sim_pseudo_all = F.cosine_similarity(q_exp, psi_exp, dim=2) / self.temperature_l
         else:
             sim_pseudo_all = torch.zeros((L, L), device=device)
-
         eye_mask = torch.eye(L, device=device, dtype=torch.bool)
         losses = []
         for k in range(L):
@@ -258,19 +226,19 @@ class Loss(nn.Module):
                 neg_pseudo = (torch.exp(sim_pseudo_all[k]) * mask_minor).sum()
             denom = pos_main + neg_real + neg_pseudo + 1e-8
             losses.append(-torch.log(pos_main / denom))
-
         cluster_loss = torch.stack(losses).sum() / (
-            L - zero_classes.numel()) if L - zero_classes.numel() > 0 else torch.tensor(0., device=device)
+                    L - zero_classes.numel()) if L - zero_classes.numel() > 0 else torch.tensor(0., device=device)
 
+        # 合并边界约束
         if self.bound_weight > 0:
             cluster_loss = cluster_loss + self.bound_weight * bound_loss
-
         if features_batch is not None and minority_indices.numel() > 1:
-            # 批内少数簇真实样本掩码
+            # 批次中少数簇真实样本
             device = psedo_labels_batch.device
             mask_real = torch.zeros_like(psedo_labels_batch, dtype=torch.bool).to(device)
             for k in minority_indices:
-                mask_real |= (psedo_labels_batch == k.item())
+                k = k.item()
+                mask_real |= (psedo_labels_batch == k)
 
             real_feats = features_batch[mask_real]
             pseudo_feats = pseudos[minority_indices]
@@ -280,66 +248,63 @@ class Loss(nn.Module):
 
         if return_mmd_excl:
             return cluster_loss, total_mmd, total_excl
-        return cluster_loss
+        else:
+            return cluster_loss
 
-    # 模块：不确定度回归损失
+
+
+
+    # —— 模块2：不确定度 MLP 回归损失 —— #
     def uncertainty_regression_loss(self, u_hat, u_true):
-        # u_hat: MLP 预测不确定度；u_true: 由 membership 计算得到的目标不确定度
-        # detach u_true 以防 teacher 目标反向影响其生成路径
+
         return self.mse(u_hat, u_true.detach())
 
-    # 模块：加权 InfoNCE
-    def weighted_info_nce(self, reps, S, temperature):
-        """
-        参数:
-        - reps: Tensor[N,D]，待对比表征
-        - S: Tensor[N,N]，pair 权重矩阵（来自一致性估计）
-        - temperature: 温度系数（小更尖锐，大更平滑）
-        """
-        sim = F.cosine_similarity(reps.unsqueeze(1), reps.unsqueeze(0), dim=2) / temperature
 
-        # 对 S 做按行归一化（先去除对角）
+    # —— 模块4：加权 InfoNCE —— #
+    def weighted_info_nce(self, reps, S, temperature):
+        sim = F.cosine_similarity(reps.unsqueeze(1), reps.unsqueeze(0), dim=2) / temperature  # (N, N)
+
+        # 按 Eq.(48) 对 S 做按行归一化（排除对角项）
         S = S.clone()
         eye = torch.eye(S.size(0), device=S.device, dtype=torch.bool)
         S = S.masked_fill(eye, 0.0)
         S = S / (S.sum(dim=1, keepdim=True) + 1e-8)
 
-        exp_sim = torch.exp(sim)
-        weighted_sim = exp_sim * S
+        # 使用归一化后的 S 对所有样本对进行加权
+        exp_sim = torch.exp(sim)  # (N, N)
+        weighted_sim = exp_sim * S  # 每个样本对的加权相似度 (N, N)
 
-        num = torch.sum(weighted_sim, dim=1)
-        den = torch.sum(exp_sim, dim=1)
+        # 计算分子和分母
+        num = torch.sum(weighted_sim, dim=1)  # 对每个样本的加权相似度求和
+        den = torch.sum(exp_sim, dim=1)  # 对每个样本的相似度求和
 
+        # 避免除零错误
         eps = 1e-8
         num = torch.clamp(num, min=eps)
         den = torch.clamp(den, min=eps)
 
-        loss = -torch.mean(torch.log(num / den))
+        # 计算最终损失
+        loss = -torch.mean(torch.log(num / den))  # 计算 InfoNCE 损失
+
         return loss
 
     def cross_view_weighted_loss(self,
-                                 um,
-                                 zs_list,
-                                 common_z,
-                                 memberships,
+                                 um,          # UncertaintyModule 实例
+                                 zs_list,     # list of view representations
+                                 common_z,    # consensus representation
+                                 memberships, # list of Tensors[N×L]
                                  batch_psedo_label,
                                  temperature=None):
         """
-        跨视图 + 共识空间加权 InfoNCE 总损失。
-
-        - um: 提供 compute_consistency_scores() 的模块（这里传 Network 实例）
-        - zs_list: 各视图表示列表
-        - common_z: 共识表示
-        - memberships: 各视图+共识隶属度
-        - batch_psedo_label: 批伪标签
+        一体化接口，计算跨视图 & 共识空间的加权 InfoNCE 总和。
         """
         if temperature is None:
             temperature = self.temperature_f
 
-        # 1) 一致性权重矩阵
+        # 1) 计算一致性分数矩阵 S
         S = um.compute_consistency_scores(memberships, batch_psedo_label)
 
-        # 2) 所有视图 + 共识统一加权对比
+        # 2) 对每个视图与共识分别做加权 InfoNCE
         loss = 0.0
         for z in zs_list:
             loss += self.weighted_info_nce(z, S, temperature)

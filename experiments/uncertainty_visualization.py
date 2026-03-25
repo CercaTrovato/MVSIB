@@ -61,7 +61,7 @@ top2_clusters = memberships[best_idx].argsort()[-2:][::-1]
 for c in top2_clusters:
     axs[1].plot([X[best_idx,0], means[c,0]], [X[best_idx,1], means[c,1]], 'k--', lw=1)
 
-# 改为取最不确定的10%
+# English explanation comment.
 threshold_idx = int(0.10*n_samples)
 sorted_idx = np.argsort(u_i)[-threshold_idx:]
 

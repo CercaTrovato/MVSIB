@@ -54,35 +54,35 @@ class MultiviewData(Dataset):
             self.labels = np.squeeze(mat['Y']).astype(np.int32)
 
         elif db == 'prokaryotic':
-            # 1. 读取 mat 文件
+            # 1. Load .mat file
             mat = hdf5storage.loadmat(os.path.join(path, 'prokaryotic.mat'))
 
-            # 2. 动态识别所有视图字段（排除元数据 __*__ 和标签字段 truth）
+            # 2. Automatically detect view fields (exclude __*__ metadata and truth labels).
             view_keys = [k for k in mat.keys()
                          if not k.startswith('__') and k != 'truth']
             if not view_keys:
-                raise KeyError("prokaryotic.mat 中未找到任何视图字段，请检查字段名。")
+                raise KeyError("No view fields found in prokaryotic.mat; please verify field names.")
 
-            # 3. 按字段加载每个视图
+            # 3. Load each view by field name.
             for key in view_keys:
                 arr = mat[key]
-                # 如果为稀疏格式，先转换 dense
+                # Convert sparse arrays to dense before further processing.
                 if hasattr(arr, 'toarray'):
                     arr = arr.toarray()
                 arr = arr.astype(np.float32)
-                # 保证样本在行上：若行数 < 列数，则转置
+                # Ensure samples are in rows; transpose when rows < columns.
                 if arr.shape[0] < arr.shape[1]:
                     arr = arr.T
                 self.data_views.append(arr)
 
             self.num_views = len(self.data_views)
 
-            # 4. 加载标签 truth
+            # 4. Load truth labels.
             if 'truth' not in mat:
-                raise KeyError("prokaryotic.mat 中缺少 'truth' 标签字段。")
+                raise KeyError("Missing 'truth' label field in prokaryotic.mat.")
             self.labels = np.squeeze(mat['truth']).astype(np.int32)
 
-            # 5. 对每个视图做 Min–Max 归一化
+            # 5. Apply Min-Max normalization to each view.
             scaler = MinMaxScaler()
             for i in range(self.num_views):
                 self.data_views[i] = scaler.fit_transform(self.data_views[i])
@@ -90,7 +90,7 @@ class MultiviewData(Dataset):
         else:
             raise NotImplementedError(f"Dataset '{db}' not supported.")
 
-        # 最后：转为 Tensor 并移动到指定 device
+        # Finally convert arrays to tensors and move to target device.
         for i in range(self.num_views):
             self.data_views[i] = torch.from_numpy(self.data_views[i]).to(device)
 

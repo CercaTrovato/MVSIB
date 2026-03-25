@@ -6,8 +6,14 @@ import numpy as np
 
 
 
-# 2.1 get_knn_graph：对应论文第 4.1 节“构建最近邻图 G”（Eq.(8)）
+# 2.1 get_knn_graph: builds the kNN graph G in Section 4.1 (Eq. 8).
 def get_knn_graph(data, k):
+    """Build a symmetric kNN adjacency matrix for one mini-batch.
+
+    Args:
+        data: Feature tensor with shape (N, D), N=samples and D=feature dim.
+        k: Number of nearest neighbors used to connect each anchor sample.
+    """
     num_samples = data.size(0)
     graph = torch.zeros(num_samples, num_samples, dtype=torch.int32, device=data.device)
 
@@ -23,8 +29,9 @@ def get_knn_graph(data, k):
     return result_graph
 
 
-# 2.2 get_W：为每个视图、每个 batch 预先计算邻接矩阵，对应 Fine-tuning 阶段特征对比里所需的G(v)
+# 2.2 get_W: precomputes batch adjacency matrices G(v) for feature-level contrastive learning in fine-tuning.
 def get_W(mv_data, k):
+    """Precompute per-view kNN adjacency matrices used by feature contrastive loss."""
     W = []
     mv_data_loader, num_views, num_samples, _ = get_all_multiview_data(mv_data)
     for _, (sub_data_views, _, _) in enumerate(mv_data_loader):
@@ -34,10 +41,11 @@ def get_W(mv_data, k):
     return W
 
 
-# 2.3 psedo_labeling：对应论文 Fine-tuning 阶段“E 步（Expectation）”
+# 2.3 psedo_labeling: E-step in fine-tuning, updates pseudo labels from current embeddings.
 # model.py
 
 def psedo_labeling(model, dataset, batch_size):
+    """Refresh pseudo labels over the whole dataset (E-step)."""
     loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
@@ -51,16 +59,17 @@ def psedo_labeling(model, dataset, batch_size):
             commonz = model.fusion(zs)
             commonZ_list.append(commonz)
     commonZ = torch.cat(commonZ_list, dim=0)
-    # clustering 返回 numpy array 或 Tensor
+    # clustering may return either a NumPy array or a Tensor.
     labels = model.clustering(commonZ)
     if isinstance(labels, np.ndarray):
         labels = torch.from_numpy(labels)
-    # 确保放到同 device 且存为 Tensor buffer
+    # move labels to the active device and keep them as a tensor buffer.
     model.psedo_labels = labels.to(model.psedo_labels.device).long()
 
 
-# 2.4 pre_train：对应论文 “Warm-up 阶段”（Eq.(12)）
+# 2.4 pre_train: warm-up stage optimized with reconstruction objective (Eq. 12).
 def pre_train(model, mv_data, batch_size, epochs, optimizer):
+    """Warm up the autoencoders with reconstruction-only objective."""
     mv_data_loader, num_views, num_samples, _ = get_multiview_data(mv_data, batch_size)
 
     pre_train_loss_values = np.zeros(epochs + 1, dtype=np.float64)
@@ -92,9 +101,11 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
                             uncertain_mask=None, eps=1e-12):
     """
     Design 1': pair-wise FN risk routing.
-    - 对 negative pair (i,j) 估计 FN 风险并在 InfoNCE 分母软降权
-    - 在可信 negatives 中按分位数选择 hard negatives（eta 矩阵）
+    - estimate FN risk for negative pair (i, j) and softly down-weight it in the InfoNCE denominator
+    - select hard negatives by quantile inside reliable negatives (eta matrix)
     """
+    # common_z: fused embedding (N, D), memberships_cons: cluster memberships q (N, L),
+    # u_hat: predicted uncertainty (N,), batch_labels: current pseudo labels (N,).
     device = common_z.device
     N = common_z.size(0)
 
@@ -122,7 +133,7 @@ def _build_pairwise_fn_risk(common_z, memberships_cons, u_hat, batch_labels, pre
     # (E3) reliability from uncertainty
     r = (1.0 - 0.5 * (u_hat.unsqueeze(1) + u_hat.unsqueeze(0))).clamp(0.0, 1.0)
 
-    # (E4) neighborhood overlap evidence，按 gate 渐进启用
+    # (E4) neighborhood-overlap evidence, gradually enabled by gate.
     if N > 1:
         k_nb = min(knn_k + 1, N)
         dist = torch.cdist(common_z, common_z, p=2)
@@ -268,25 +279,32 @@ def contrastive_train(model, mv_data, mvc_loss,
                       y_prev_labels=None,
                       p_min=0.05,
                       u_min=32):
+    """Run one epoch of contrastive training on standard-size datasets.
+
+    Notes on first-use tensors:
+    - `common_z` is the fused consensus embedding for the current batch.
+    - `memberships` stores q for each view and the consensus branch.
+    - `u_hat` is per-sample predicted uncertainty for curriculum and routing.
+    """
     model.train()
     mv_data_loader, num_views, num_samples, num_clusters = get_multiview_data(mv_data, batch_size)
 
-    # 将 all_features 和 all_labels 初始化为 Python 列表
-    all_features = []  # 用于收集每个批次的特征
-    all_labels = []  # 用于收集每个批次的标签
+    # Initialize feature and label collectors for epoch-level logging.
+    all_features = []  # stores per-batch features
+    all_labels = []  # stores per-batch labels
 
-    # 课程学习式动态不确定比例
+    # Curriculum-driven uncertain ratio.
     top_p_e = max(p_min, initial_top_p * max(0.0, 1.0 - (epoch - 1) / float(max_epoch - 1)))
 
-    # E 步：更新全量伪标签
+    # E-step: refresh pseudo labels over the full dataset.
     psedo_labeling(model, mv_data, batch_size)
 
-    # Push/Pull Lpen 超参
+    # Push/Pull penalty hyper-parameters.
     lambda_push = lambda_hn_penalty
     lambda_pull = lambda_hn_penalty
     margin = 0.2
 
-    criterion = torch.nn.MSELoss()  # 添加重建损失的损失函数
+    criterion = torch.nn.MSELoss()  # reconstruction loss function
 
     epoch_meter = {'L_total':0.0,'L_recon':0.0,'L_feat':0.0,'L_cross':0.0,'L_cluster':0.0,'L_uncert':0.0,'L_hn':0.0,'L_reg':0.0}
     route_meter = {'fn_ratio':0.0,'safe_ratio':0.0,'hn_ratio':0.0,'mean_s_post_fn':0.0,'mean_s_post_non_fn':0.0,'delta_post':0.0,'mean_sim_hn':0.0,'mean_sim_safe_non_hn':0.0,'delta_sim':0.0,'label_flip':0.0,'stab_rate':0.0,'denom_fn_share':0.0,'denom_safe_share':0.0,'w_hit_min_ratio':0.0,'corr_u_fn_ratio':0.0,'N_size':0.0,'U_size':0.0}
@@ -294,28 +312,28 @@ def contrastive_train(model, mv_data, mvc_loss,
     last_dump = {}
 
     for batch_idx, (sub_data_views, _, sample_idx) in enumerate(mv_data_loader):
-        # ——— 1) 伪标签 & 同/异样本矩阵 ———
+        # --- 1) Pseudo labels and same/different-sample masks ---
         batch_psedo_label = model.psedo_labels[sample_idx]                # [N]
         y_matrix = (batch_psedo_label.unsqueeze(1) == batch_psedo_label.unsqueeze(0)).int()
 
-        # ——— 2) 编码 + 融合 ———
+        # --- 2) Encode each view and fuse to consensus embedding ---
         xrs, zs = model(sub_data_views)
         common_z = model.fusion(zs)
 
-        # 现在有了 common_z，确定 device
+        # Use common_z to determine the active tensor device.
         device = common_z.device
 
-        # 把索引张量都搬到 device
+        # Move index tensors to the same device.
         batch_psedo_label = batch_psedo_label.to(device)
 
-        # ——— 3) 更新中心 + 隶属度 + 不确定度 ———
+        # --- 3) Update centers, memberships, and uncertainty ---
         model.update_centers(zs, common_z)
         features = zs + [common_z]
         memberships = [model.compute_membership(features[v], v) for v in range(num_views + 1)]
         u, u_hat = model.estimate_uncertainty(memberships, common_z)
         batch_N  = u_hat.size(0)
 
-        # ——— 4) 课程学习式不确定划分 ———
+        # --- 4) Curriculum split between certain/uncertain samples ---
         k_unc = max(min(u_min, batch_N), int(batch_N * top_p_e))
         _, idx_topk = torch.topk(u_hat, k_unc, largest=True)
         uncertain_mask = torch.zeros(batch_N, dtype=torch.bool, device=device)
@@ -324,7 +342,7 @@ def contrastive_train(model, mv_data, mvc_loss,
 
         print(f"Batch {batch_idx}: uncertain {uncertain_mask.sum().item()}/{batch_N} = {uncertain_mask.sum().item()/batch_N:.2%}")
 
-        # ——— 5) 动态门控 Gate ———
+        # --- 5) Dynamic gate for mechanism interpolation ---
         u_mean = u_hat.mean().item()
         mu_start, mu_end = 0.3, 0.7
         raw_gate = (u_mean - mu_start) / (mu_end - mu_start)
@@ -335,10 +353,10 @@ def contrastive_train(model, mv_data, mvc_loss,
         gate_val = t
         gate = torch.tensor(gate_val, device=device)
 
-        # ——— 6) 计算共识中心 q_centers ———
+        # --- 6) Compute consensus centers q_centers ---
         q_centers = model.compute_centers(common_z, batch_psedo_label)
 
-        # ——— 7) Design 1': pair-wise FN 风险路由（停用原 FN/HN MLP 路径）———
+        # --- 7) Design 1': pair-wise FN-risk routing (disables original FN/HN MLP path) ---
         prev_batch = None if y_prev_labels is None else y_prev_labels[sample_idx].to(device)
         route_mask = uncertain_mask if route_uncertain_only else None
         u_thr = u_hat[idx_topk].min().item() if idx_topk.numel() > 0 else 0.0
@@ -358,16 +376,16 @@ def contrastive_train(model, mv_data, mvc_loss,
             uncertain_mask=route_mask,
         )
 
-        # ——— 8) 累加各项损失 ———
+        # --- 8) Accumulate all loss terms ---
         loss_list = []
-        Lcl = Lfeat = Lu = Lpen = Lcross = Lrecon = 0.0  # 添加重建损失
+        Lcl = Lfeat = Lu = Lpen = Lcross = Lrecon = 0.0  # including reconstruction loss
 
         for v in range(num_views):
-            # 准备 Wv 和 y_pse
+            # prepare Wv and soft pseudo-label matrix y_pse
             Wv = W[v][sample_idx][:, sample_idx].to(device)
             y_pse = y_matrix.float().to(device)
 
-            # a) 簇级 InfoNCE
+            # a) cluster-level InfoNCE
             k_centers = model.compute_centers(zs[v], batch_psedo_label)
             if epoch <= 50:
                 cl = mvc_loss.compute_cluster_loss(q_centers, k_centers, batch_psedo_label)
@@ -383,13 +401,13 @@ def contrastive_train(model, mv_data, mvc_loss,
             Lcl += Lcl_i.item()
             loss_list.append(Lcl_i)
 
-            # b) Feature loss + 软屏蔽 FN
+            # b) feature loss with soft FN masking
             feat_loss = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=w_neg)
             Lfeat_i = beta * feat_loss
             Lfeat += Lfeat_i.item()
             loss_list.append(Lfeat_i)
 
-            # c) 不确定度回归
+            # c) uncertainty regression
             u_loss = mvc_loss.uncertainty_regression_loss(u_hat, u)
             Lu_i = (1 - gate_u) * lambda_u * u_loss
             Lu += Lu_i.item()
@@ -409,7 +427,7 @@ def contrastive_train(model, mv_data, mvc_loss,
             Lpen += Lpen_i.item()
             loss_list.append(Lpen_i)
 
-            # e) 跨视图加权 InfoNCE
+            # e) cross-view weighted InfoNCE
             if epoch > cross_warmup_epochs:
                 cross_l = mvc_loss.cross_view_weighted_loss(
                     model, zs, common_z, memberships,
@@ -419,12 +437,12 @@ def contrastive_train(model, mv_data, mvc_loss,
                 Lcross += Lcross_i.item()
                 loss_list.append(Lcross_i)
 
-            # f) 每个视图的重建损失
-            recon_loss = criterion(sub_data_views[v], xrs[v])  # 计算每个视图的重建损失
+            # f) per-view reconstruction loss
+            recon_loss = criterion(sub_data_views[v], xrs[v])  # compute per-view reconstruction loss
             Lrecon += recon_loss.item()
-            loss_list.append(recon_loss)  # 加入总损失
+            loss_list.append(recon_loss)  # append to loss list
 
-        # ——— 9) 梯度更新 & 打印 ———
+        # --- 9) Backpropagation and logging ---
         total_loss = sum(loss_list)
         optimizer.zero_grad()
         total_loss.backward()
@@ -494,7 +512,7 @@ def contrastive_train(model, mv_data, mvc_loss,
               f"FN_ratio={route_stats['fn_ratio']:.3f} HN_ratio={route_stats['hn_ratio']:.3f} "
               f"U_ratio={route_stats['U_ratio']:.3f} stab={route_stats['stab_rate']:.3f}")
 
-    # ===== 训练循环结束 =====
+    # ===== End of training loop =====
     if batch_count > 0:
         for k in epoch_meter:
             epoch_meter[k] /= batch_count
@@ -510,11 +528,11 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                                    batch_size, epoch, k,
                                    alpha, beta,
                                    optimizer,
-                                   warmup_epochs=10,    # 默认热身 10 个 epoch
-                                   prog=1.0,            # 默认进度权重 1.0
-                                   lambda_u=0.1,        # 默认不确定度回归权重
+                                   warmup_epochs=10,    # default warm-up is 10 epochs
+                                   prog=1.0,            # default progress weight is 1.0
+                                   lambda_u=0.1,        # default uncertainty regression weight
                                    lambda_hn_penalty=0.1,
-                                   temperature_f=0.5,    # 默认温度系数
+                                   temperature_f=0.5,    # default temperature
                                    max_epoch=100,
                                    initial_top_p=0.3,
                                    cross_warmup_epochs=50,
@@ -529,9 +547,9 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                                    p_min=0.05,
                                    u_min=32):
     """
-    大数据集版 Contrastive Training：
-    - k: 用于构建每个视图下的 k-NN 图
-    - 其它参数含义同原版 contrastive_train
+    Large-dataset variant of contrastive training:
+    - k: number of neighbors for per-view kNN graph construction
+    - other arguments keep the same meaning as contrastive_train
     """
     model.train()
     mv_loader, num_views, _, num_clusters = get_multiview_data(mv_data, batch_size)
@@ -542,42 +560,42 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
     batch_count = 0
     last_dump = {}
 
-    # 1) 课程学习式动态不确定比例
+    # 1) Curriculum-driven uncertain ratio.
     top_p = max(p_min, initial_top_p * max(0.0, 1.0 - (epoch - 1) / float(max_epoch - 1)))
 
-    # 2) E 步：更新全量伪标签
+    # 2) E-step: refresh pseudo labels over the full dataset.
     psedo_labeling(model, mv_data, batch_size)
 
     for batch_idx, (sub_data_views, _, sample_idx) in enumerate(mv_loader):
-        # ▶ 设备
+        # Device setup
         device = next(model.parameters()).device
-        # ▶ 准备输入
+        # Prepare mini-batch inputs
         sub_views = [v.to(device) for v in sub_data_views]
         batch_label = model.psedo_labels[sample_idx].to(device)
 
-        # ——— 伪标签相似矩阵 ———
+        # --- pseudo-label similarity matrix ---
         y_matrix = (batch_label.unsqueeze(1) == batch_label.unsqueeze(0)).int()
 
-        # ——— 编码 + 融合 ———
+        # --- encoding and fusion ---
         _, zs = model(sub_views)
         zs = [z_i.to(device) for z_i in zs]
         common_z = model.fusion(zs).to(device)
 
-        # ——— 更新中心、隶属度、不确定度 ———
+        # --- update centers, memberships, and uncertainty ---
         model.update_centers(zs, common_z)
         feats = zs + [common_z]
         memberships = [model.compute_membership(feats[v], v) for v in range(num_views + 1)]
         u, u_hat = model.estimate_uncertainty(memberships, common_z)
         B = u_hat.size(0)
 
-        # ——— 课程学习式不确定划分 ———
+        # --- curriculum uncertain split ---
         k_unc = max(min(u_min, B), int(B * top_p))
         _, topk_idx = torch.topk(u_hat, k_unc, largest=True)
         uncertain = torch.zeros(B, dtype=torch.bool, device=device)
         uncertain[topk_idx] = True
         certain = ~uncertain
 
-        # ——— 动态门控 Gate ———
+        # --- dynamic gate ---
         u_mean = u_hat.mean().item()
         mu_lo, mu_hi = 0.3, 0.7
         gate_u = float((u_mean - mu_lo) / (mu_hi - mu_lo))
@@ -588,10 +606,10 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
         gate = t
         gate_t = torch.tensor(gate, device=device)
 
-        # ——— 共识中心 ———
+        # --- consensus centers ---
         q_centers = model.compute_centers(common_z, batch_label)
 
-        # ——— Design 1': pair-wise FN 风险路由（停用原 FN/HN MLP 路径）———
+        # English explanation comment.
         prev_batch = None if y_prev_labels is None else y_prev_labels[sample_idx].to(device)
         route_mask = uncertain if route_uncertain_only else None
         u_thr = u_hat[topk_idx].min().item() if topk_idx.numel() > 0 else 0.0
@@ -611,14 +629,14 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             uncertain_mask=route_mask,
         )
 
-        # ——— 构造并累加各视图的损失 ———
+        # --- build and accumulate per-view losses ---
         batch_loss = 0.0
         for v in range(num_views):
-            # 动态 k-NN Graph
+            # dynamic kNN graph
             Wv = get_knn_graph(sub_views[v], k).to(device)
             y_pse = y_matrix.float()
 
-            # a) 簇级 InfoNCE
+            # a) cluster-level InfoNCE
             kv_centers = model.compute_centers(zs[v], batch_label)
             if epoch <= 50:
                 cl = mvc_loss.compute_cluster_loss(q_centers, kv_centers, batch_label)
@@ -633,12 +651,12 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             Lcl = alpha * cl
             batch_loss += Lcl
 
-            # b) Feature loss（软屏蔽 FN）
+            # b) feature loss (soft FN masking)
             feat_l = mvc_loss.feature_loss(zs[v], common_z, Wv, y_pse, neg_weights=w_neg)
             Lfeat = beta * feat_l
             batch_loss += Lfeat
 
-            # c) 不确定度回归
+            # c) uncertainty regression
             u_l = mvc_loss.uncertainty_regression_loss(u_hat, u)
             Lu = (1 - gate_u) * lambda_u * u_l
             batch_loss += Lu
@@ -655,7 +673,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
             Lpen = gate_hn * (lambda_hn_penalty * push + lambda_hn_penalty * pull)
             batch_loss += Lpen
 
-            # e) 跨视图加权 InfoNCE
+            # e) cross-view weighted InfoNCE
             if epoch > cross_warmup_epochs:
                 cross_l = mvc_loss.cross_view_weighted_loss(
                     model, zs, common_z, memberships,
@@ -664,7 +682,7 @@ def contrastive_largedatasetstrain(model, mv_data, mvc_loss,
                 Lcross = gate_fn * beta * prog * cross_l
                 batch_loss += Lcross
 
-        # ——— 梯度更新 ———
+        # --- gradient update ---
         optimizer.zero_grad()
         batch_loss.backward()
         optimizer.step()

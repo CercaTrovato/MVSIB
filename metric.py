@@ -65,7 +65,7 @@ def valid(model, dataset, data_size, class_num):
         )
         labels_vector, commonZ = inference(test_loader, model, data_size)
 
-        # 用 PyTorchKMeans 替代 model.clustering
+        # Use PyTorchKMeans instead of model.clustering.
         clustering_model = PyTorchKMeans(
             init='k-means++',
             n_clusters=class_num,
@@ -76,7 +76,7 @@ def valid(model, dataset, data_size, class_num):
         y_pred = clustering_model.fit_predict(commonZ.to(dtype=torch.float64))
         y_pred = y_pred.cpu().numpy()
 
-        # 聚类评估
+        # Clustering evaluation
         print('Clustering results:')
         nmi, ari, acc, pur, f_score = evaluate(labels_vector, y_pred)
         print('ACC = {:.4f} NMI = {:.4f} PUR = {:.4f} ARI = {:.4f} f_score = {:.4f}'.format(

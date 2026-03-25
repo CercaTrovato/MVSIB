@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-实验日志统计与可视化工具（MVSIB 专用）
+English documentation details.
 
-功能目标：
-1) 解析 train.py 产出的 Args / METRIC / ROUTE / DISTR / Final/Best 段落；
-2) 做硬不变量 + 软规则审计，输出 ERROR/WARN/INFO 分级报告；
-3) 进行阶段统计、机制闭环分析、loss 占比分析；
-4) 生成面向实验复盘的可视化图表与结构化数据文件。
+English documentation details.
+English documentation details.
+English documentation details.
+English documentation details.
+English documentation details.
 """
 
 from __future__ import annotations
@@ -30,12 +30,12 @@ KV_RE = re.compile(r"([A-Za-z0-9_]+)=([^\s]+)")
 
 @dataclass
 class RuleEvent:
-    """规则事件。
+    """English documentation for this section.
 
     level: ERROR/WARN/INFO
-    rule: 规则名称
-    epoch: 触发的 epoch（如无则 -1）
-    detail: 详细说明
+    English documentation details.
+    English documentation details.
+    English documentation details.
     """
 
     level: str
@@ -46,11 +46,11 @@ class RuleEvent:
 
 @dataclass
 class ParsedLog:
-    """日志结构化结果。
+    """English documentation for this section.
 
-    - args_dict: Args 字段
-    - metric_rows / route_rows / distr_rows: 各条目（按 epoch）
-    - final_summary: 结尾摘要字段
+    English documentation details.
+    English documentation details.
+    English documentation details.
     """
 
     args_dict: Dict[str, Any]
@@ -61,10 +61,10 @@ class ParsedLog:
 
 
 def _to_num(v: str) -> Any:
-    """把日志值转为数字或字符串。
+    """English documentation for this section.
 
-    目的：统一处理 int/float/布尔/字符串，便于后续统计。
-    结果说明：若无法转数字则保留原字符串，保证解析不崩溃。
+    English documentation details.
+    English documentation details.
     """
 
     lv = v.lower()
@@ -81,10 +81,10 @@ def _to_num(v: str) -> Any:
 
 
 def parse_kv_segment(seg: str) -> Dict[str, Any]:
-    """解析形如 key=value 的平铺字段串。
+    """English documentation for this section.
 
-    目的：解析 METRIC/ROUTE/DISTR 行主体。
-    结果说明：返回字典，键为字段名，值为数字或字符串。
+    English documentation details.
+    English documentation details.
     """
 
     out = {}
@@ -94,17 +94,17 @@ def parse_kv_segment(seg: str) -> Dict[str, Any]:
 
 
 def parse_args_line(line: str) -> Dict[str, Any]:
-    """解析 Args: Namespace(...) 行。
+    """English documentation for this section.
 
-    目的：提取实验配置，供阶段切分和报表标题使用。
-    结果说明：若解析失败返回空字典，不阻塞主流程。
+    English documentation details.
+    English documentation details.
     """
 
     m = re.search(r"Args:\s*Namespace\((.*)\)$", line)
     if not m:
         return {}
     inner = m.group(1)
-    # 将 a=1,b='x' 包装成 dict 字面量再 ast 解析
+    # English explanation comment.
     try:
         py_expr = "{" + re.sub(r"(\w+)=", r"'\1':", inner) + "}"
         return ast.literal_eval(py_expr)
@@ -113,10 +113,10 @@ def parse_args_line(line: str) -> Dict[str, Any]:
 
 
 def parse_log_file(log_path: Path) -> ParsedLog:
-    """解析单个日志文件。
+    """English documentation for this section.
 
-    目的：把原始日志映射为结构化数据，供统计/审计/作图复用。
-    结果说明：返回 ParsedLog；缺失段不会抛异常，尽可能容错。
+    English documentation details.
+    English documentation details.
     """
 
     args_dict: Dict[str, Any] = {}
@@ -149,7 +149,7 @@ def parse_log_file(log_path: Path) -> ParsedLog:
         elif "Best Evaluation" in ln:
             final_summary["best_line"] = ln
 
-    # 按 epoch 排序，避免乱序影响分析
+    # English explanation comment.
     metric_rows.sort(key=lambda x: x.get("epoch", 0))
     route_rows.sort(key=lambda x: x.get("epoch", 0))
     distr_rows.sort(key=lambda x: x.get("epoch", 0))
@@ -158,10 +158,10 @@ def parse_log_file(log_path: Path) -> ParsedLog:
 
 
 def merge_by_epoch(*rows_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """按 epoch 外连接合并多类行。
+    """English documentation for this section.
 
-    目的：统一得到一个“每 epoch 一行”的宽表，便于规则和关联分析。
-    结果说明：缺字段会保留为缺失，不会强行填错值。
+    English documentation details.
+    English documentation details.
     """
 
     by_epoch: Dict[int, Dict[str, Any]] = {}
@@ -175,10 +175,10 @@ def merge_by_epoch(*rows_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def phase_ranges(args_dict: Dict[str, Any], max_epoch: int) -> List[Tuple[str, int, int]]:
-    """基于训练里程碑定义阶段。
+    """English documentation for this section.
 
-    目的：和训练机制对齐（warmup / cross_warmup），避免任意切段。
-    结果说明：输出 phase0/1/2 的 epoch 区间，供图表和统计复用。
+    English documentation details.
+    English documentation details.
     """
 
     w = int(args_dict.get("warmup_epochs", 20))
@@ -193,7 +193,7 @@ def phase_ranges(args_dict: Dict[str, Any], max_epoch: int) -> List[Tuple[str, i
 
 
 def _safe(v: Any, default=np.nan) -> float:
-    """安全取 float 值，失败回 NaN。"""
+    """Safely parse a float value; return NaN on failure."""
 
     try:
         return float(v)
@@ -202,10 +202,10 @@ def _safe(v: Any, default=np.nan) -> float:
 
 
 def validate_rules(rows: List[Dict[str, Any]], eps: float = 5e-3) -> List[RuleEvent]:
-    """执行硬不变量与软规则审计。
+    """English documentation for this section.
 
-    目的：把“看图判断”转成可复现的实验审计规则。
-    结果说明：返回 RuleEvent 列表（ERROR/WARN/INFO），并记录触发 epoch。
+    English documentation details.
+    English documentation details.
     """
 
     events: List[RuleEvent] = []
@@ -230,7 +230,7 @@ def validate_rules(rows: List[Dict[str, Any]], eps: float = 5e-3) -> List[RuleEv
         empty_cluster = _safe(r.get("empty_cluster", np.nan))
         min_cluster = _safe(r.get("min_cluster", np.nan))
 
-        # ===== 硬不变量 =====
+        # English explanation comment.
         if not (0.0 - eps <= fnr <= 1.0 + eps):
             events.append(RuleEvent("ERROR", "fn_ratio_range", ep, f"FN_ratio={fnr}"))
         if not (0.0 - eps <= hnr <= 1.0 + eps):
@@ -240,17 +240,17 @@ def validate_rules(rows: List[Dict[str, Any]], eps: float = 5e-3) -> List[RuleEv
         if not (math.isnan(u_size) or u_size <= 0 or math.isnan(used) or used > 0):
             events.append(RuleEvent("ERROR", "neg_used_nonzero", ep, f"U_size={u_size}, used={used}"))
 
-        # 比率-计数重算一致性（count-based share）
+        # English explanation comment.
         if not (math.isnan(fnc) or math.isnan(neg) or neg <= 0):
             fnr_re = fnc / neg
-            if not math.isnan(fnr) and abs(fnr - fnr_re) > 0.05:  # 容许不同口径，但偏差太大报警
+            if not math.isnan(fnr) and abs(fnr - fnr_re) > 0.05:  # Different counting conventions are tolerated; large deviation raises a warning
                 events.append(RuleEvent("WARN", "fn_ratio_recompute_gap", ep, f"FN_ratio={fnr:.4f}, FN_count/neg_count={fnr_re:.4f}"))
         if not (math.isnan(hnc) or math.isnan(safe_neg) or safe_neg <= 0):
             hnr_re = hnc / safe_neg
             if not math.isnan(hnr) and abs(hnr - hnr_re) > 0.05:
                 events.append(RuleEvent("WARN", "hn_ratio_recompute_gap", ep, f"HN_ratio={hnr:.4f}, HN_count/safe_neg={hnr_re:.4f}"))
 
-        # share 强一致（通常应接近）
+        # English explanation comment.
         if not (math.isnan(fshare) or math.isnan(fnc) or math.isnan(neg) or neg <= 0):
             if abs(fshare - fnc / neg) > 0.02:
                 events.append(RuleEvent("ERROR", "fn_pair_share_consistency", ep, f"fn_pair_share={fshare:.4f}, FN_count/neg_count={fnc/neg:.4f}"))
@@ -258,7 +258,7 @@ def validate_rules(rows: List[Dict[str, Any]], eps: float = 5e-3) -> List[RuleEv
             if abs(hshare - hnc / safe_neg) > 0.02:
                 events.append(RuleEvent("ERROR", "hn_pair_share_consistency", ep, f"hn_pair_share={hshare:.4f}, HN_count/safe_neg={hnc/safe_neg:.4f}"))
 
-        # ===== 软规则 =====
+        # English explanation comment.
         if (not math.isnan(label_flip) and not math.isnan(stab_rate) and label_flip > 0.95 and stab_rate < 0.05):
             events.append(RuleEvent("WARN", "route_instability", ep, f"label_flip={label_flip:.3f}, stab_rate={stab_rate:.3f}"))
         if not math.isnan(w_hit) and w_hit == 0.0:
@@ -272,10 +272,10 @@ def validate_rules(rows: List[Dict[str, Any]], eps: float = 5e-3) -> List[RuleEv
 
 
 def summarize_phase(rows: List[Dict[str, Any]], phases: List[Tuple[str, int, int]]) -> Dict[str, Dict[str, float]]:
-    """分阶段汇总关键指标均值。
+    """English documentation for this section.
 
-    目的：回答“在哪个阶段发生了机制变化/性能退化”。
-    结果说明：输出 phase -> 指标均值字典，可用于报告表格。
+    English documentation details.
+    English documentation details.
     """
 
     keys = ["ACC", "F1", "L_total", "L_cross", "L_feat", "FN_ratio", "HN_ratio", "gate"]
@@ -295,10 +295,10 @@ def summarize_phase(rows: List[Dict[str, Any]], phases: List[Tuple[str, int, int
 
 
 def corr(a: np.ndarray, b: np.ndarray) -> float:
-    """皮尔逊相关。
+    """English documentation for this section.
 
-    目的：量化机制量与性能之间的同步关系。
-    结果说明：返回 [-1,1]，绝对值越大关系越强（不代表因果）。
+    English documentation details.
+    English documentation details.
     """
 
     m = np.isfinite(a) & np.isfinite(b)
@@ -308,10 +308,10 @@ def corr(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def mechanism_analysis(rows: List[Dict[str, Any]]) -> Dict[str, float]:
-    """机制闭环分析（ROUTE ↔ DISTR ↔ METRIC）。
+    """English documentation for this section.
 
-    目的：解释性能变化对应的路由/分布机制变化，而不是只看单一曲线。
-    结果说明：输出关键相关性，辅助定位退化阶段的机制原因。
+    English documentation details.
+    English documentation details.
     """
 
     arr = lambda key: np.array([_safe(r.get(key, np.nan)) for r in rows], dtype=float)
@@ -326,10 +326,10 @@ def mechanism_analysis(rows: List[Dict[str, Any]]) -> Dict[str, float]:
 
 
 def save_csv(rows: List[Dict[str, Any]], path: Path) -> None:
-    """保存宽表 CSV。
+    """English documentation for this section.
 
-    目的：便于后续 pandas/Jupyter 再分析和论文图复现。
-    结果说明：字段并集写出，不丢信息。
+    English documentation details.
+    English documentation details.
     """
 
     keys = sorted({k for r in rows for k in r.keys()})
@@ -342,23 +342,23 @@ def save_csv(rows: List[Dict[str, Any]], path: Path) -> None:
 
 
 def plot_dashboard(rows: List[Dict[str, Any]], phases: List[Tuple[str, int, int]], out_png: Path) -> None:
-    """阶段标注总览图（核心图）。
+    """English documentation for this section.
 
-    计算/可视化内容：
-    - 子图1：ACC/F1 曲线；
-    - 子图2：L_total 与 L_cross/L_total；
-    - 子图3：FN/HN ratio；
-    - 子图4：candidate/filter/used 负样本规模；
-    - 子图5：u_p50/gamma_p50/S_p50；
-    - 子图6：route_count_inconsistent 与 empty_cluster。
+    English documentation details.
+    English documentation details.
+    English documentation details.
+    English documentation details.
+    English documentation details.
+    English documentation details.
+    English documentation details.
 
-    方法目的：
-    - 用一张图概览“性能-损失-路由-分布-一致性”闭环；
-    - 标注阶段边界后更容易定位机制切换点（warmup/cross_warmup）。
+    English documentation details.
+    English documentation details.
+    English documentation details.
 
-    结果说明：
-    - 若 phase2 中 L_cross 占比上升且 ACC 下滑，提示一致性项可能后期主导；
-    - 若 route inconsistency/empty cluster 抬升，提示训练统计或聚类退化风险。
+    English documentation details.
+    English documentation details.
+    English documentation details.
     """
 
     ep = np.array([int(r.get("epoch", 0)) for r in rows])
@@ -424,11 +424,11 @@ def plot_dashboard(rows: List[Dict[str, Any]], phases: List[Tuple[str, int, int]
 
 
 def plot_loss_ratio(rows: List[Dict[str, Any]], out_png: Path) -> None:
-    """绘制 loss 占比图。
+    """English documentation for this section.
 
-    计算/可视化内容：L_cross/L_total、L_feat/L_total、L_cluster/L_total、L_uncert/L_total、L_hn/L_total。
-    方法目的：识别“谁在主导优化”，比绝对值更利于解释退化。
-    结果说明：某项长期占比异常抬升，通常代表该项主导梯度更新。
+    English documentation details.
+    English documentation details.
+    English documentation details.
     """
 
     ep = np.array([int(r.get("epoch", 0)) for r in rows])
@@ -454,10 +454,10 @@ def plot_loss_ratio(rows: List[Dict[str, Any]], out_png: Path) -> None:
 
 def write_report_md(path: Path, args_dict: Dict[str, Any], phase_stat: Dict[str, Dict[str, float]],
                     mech: Dict[str, float], events: List[RuleEvent], rows: List[Dict[str, Any]]) -> None:
-    """写 Markdown 总结。
+    """English documentation for this section.
 
-    目的：输出可直接贴实验记录/PR 的文字结论。
-    结果说明：包含规则分级、阶段统计、机制相关性与关键结论。
+    English documentation details.
+    English documentation details.
     """
 
     e_cnt = sum(1 for e in events if e.level == "ERROR")
@@ -489,7 +489,7 @@ def write_report_md(path: Path, args_dict: Dict[str, Any], phase_stat: Dict[str,
     for k, v in mech.items():
         lines.append(f"- {k}: {v:.4f}\n")
 
-    # 列出前若干严重问题
+    # English explanation comment.
     bad = [e for e in events if e.level in {"ERROR", "WARN"}][:30]
     if bad:
         lines.append("\n## 主要告警样本（前30条）\n")
@@ -501,7 +501,7 @@ def write_report_md(path: Path, args_dict: Dict[str, Any], phase_stat: Dict[str,
 
 
 def save_events_json(path: Path, events: List[RuleEvent]) -> None:
-    """保存规则事件 JSON。"""
+    """Save rule events as JSON."""
 
     data = [e.__dict__ for e in events]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -509,14 +509,14 @@ def save_events_json(path: Path, events: List[RuleEvent]) -> None:
 
 
 def main() -> None:
-    """主入口。
+    """English documentation for this section.
 
-    执行流程：
-    1) 解析日志；
-    2) 合并宽表；
-    3) 规则审计；
-    4) 阶段/机制统计；
-    5) 导出 CSV/JSON/MD/PNG。
+    English documentation details.
+    English documentation details.
+    English documentation details.
+    English documentation details.
+    English documentation details.
+    English documentation details.
     """
 
     ap = argparse.ArgumentParser(description="Analyze MVSIB train logs")
@@ -548,7 +548,7 @@ def main() -> None:
     plot_dashboard(merged, phases, out_dir / "01_overview_phase_dashboard.svg")
     plot_loss_ratio(merged, out_dir / "02_loss_contribution_ratio.svg")
 
-    # 机器可读总体摘要
+    # English explanation comment.
     payload = {
         "args": parsed.args_dict,
         "phase_stat": phase_stat,

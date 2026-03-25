@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 import torch_clustering
 
-# 1.1 编码器（Encoder）与解码器（Decoder）对应论文 Section 2.1
+# 1.1 Encoder/Decoder modules corresponding to paper Section 2.1.
 class Encoder(nn.Module):
     def __init__(self, input_dim, feature_dim):
         super(Encoder, self).__init__()
@@ -37,13 +37,13 @@ class Decoder(nn.Module):
     def forward(self, x):
         return self.decoder(x)
 
-# 1.2 forward：分别对每个视图进行编码／解码，对应论文中“View-Specific Autoencoder”
+# 1.2 forward: per-view encode/decode pass for view-specific autoencoders.
 class Network(nn.Module):
     def __init__(self, num_views, num_samples, num_clusters, device,
                  input_size, feature_dim,
                  tau=5, eps=1e-3,
-                 fn_hn_k=5,       # kNN 邻居数,
-                 fn_hn_hidden=64,  # MLP2 隐藏维度
+                 fn_hn_k=5,       # kNN neighbor count,
+                 fn_hn_hidden=64,  # MLP2 hidden dimension
                  membership_mode='softmax_distance',
                  membership_temperature=1.0,
                  uncertainty_mode='log_odds',
@@ -65,7 +65,7 @@ class Network(nn.Module):
         self.device = device
         self.tau = tau
         self.eps = eps
-        # SCE 改进配置：支持 legacy 与 log-odds 两条可切换路径，便于做消融对照
+        #SCE configuration: switch between legacy and log-odds paths for ablations.
         self.membership_mode = membership_mode
         self.membership_temperature = membership_temperature
         self.uncertainty_mode = uncertainty_mode
@@ -76,11 +76,11 @@ class Network(nn.Module):
         self.psedo_labels = torch.zeros(num_samples, dtype=torch.long)
         self.weights = nn.Parameter(torch.full((self.num_views,), 1 / self.num_views), requires_grad=True)
 
-        # —— 模块1：簇中心与带宽 σ存储 ——
+        # -- Module 1: cluster centers and bandwidth σ buffers --
         self.centers = [None] * (self.num_views + 1)
         self.sigmas = [None] * (self.num_views + 1)
 
-        # —— 模块2：不确定度预测 MLP ——
+        # -- Module 2: uncertainty-prediction MLP --
         hidden_dim = feature_dim // 2
         self.mlp_uncert = nn.Sequential(
             nn.Linear(feature_dim, hidden_dim),
@@ -89,15 +89,15 @@ class Network(nn.Module):
             nn.Sigmoid()
         )
 
-        # —— 模块 3：FN/HN 子模块 ——
+        # -- Module 3: FN/HN sub-module --
         self.fn_hn_k = fn_hn_k
-        # —— 模块3：FN vs HN 分类器 MLP（输入维度 = num_views + 2） ——
+        # -- Module 3: FN-vs-HN classifier MLP (input dim = num_views + 2) --
         #   (degree_diff, center_sim, + one affinity per view)
         in_dim = 3
         self.mlp_fn_hn = nn.Sequential(
             nn.Linear(in_dim, fn_hn_hidden),
             nn.ReLU(),
-            nn.Linear(fn_hn_hidden, 2)  # 输出 2 类 logits
+            nn.Linear(fn_hn_hidden, 2)  # outputs 2-class logits
         )
 
     def forward(self, xs):
@@ -117,7 +117,7 @@ class Network(nn.Module):
 
         return weights
 
-# 1.3 特征融合（fusion）：对应论文 Eq.(4)
+# 1.3 Feature fusion module corresponding to Eq.(4).
     def fusion(self, zs):
         weights = self.get_weights()
         weighted_zs = [z * weight for z, weight in zip(zs, weights)]
@@ -126,27 +126,27 @@ class Network(nn.Module):
 
         return common_z
 
-# 1.4 簇中心计算（compute_centers）对应论文 Eq.(6)-(7)
+# 1.4 Cluster center computation for Eq.(6)-(7).
     def compute_centers(self, x, psedo_labels):
         """
-        严格复刻原版权重矩阵 @ x 的写法，100% 等价于 F.normalize(one_hot,1)@x
+        Exactly reproduces the original weight-matrix @ x form, equivalent to F.normalize(one_hot,1)@x.
         """
         device = x.device
         ps = psedo_labels.to(device)
         N, d = x.shape
         L = self.num_clusters
 
-        # —— 1) 构造 one-hot 矩阵 (L, N) ——
+        # -- 1) Build one-hot matrix (L, N) --
         weight = torch.zeros(L, N, device=device)
         weight[ps, torch.arange(N, device=device)] = 1.0
 
-        # —— 2) L1 归一化每行 ——
-        weight = F.normalize(weight, p=1, dim=1)  # 保证每行加和=1
+        # -- 2) L1-normalize each row --
+        weight = F.normalize(weight, p=1, dim=1)  # ensures each row sums to 1
 
         # —— 3) centers = weight @ x ——
         centers = weight @ x  # (L, d)
 
-        # —— 4) L2 归一化每个中心 ——
+        # -- 4) L2-normalize each center --
         centers = F.normalize(centers, p=2, dim=1)
 
         return centers
@@ -166,8 +166,8 @@ class Network(nn.Module):
 
     def update_centers(self, zs_list, common_z):
         """
-        每隔 tau 调用，用 PyTorchKMeans 计算簇中心 & σ。
-        首次调用或任一中心为 None 时强制更新一次。整个过程不跟踪梯度。
+        Called every tau steps: compute centers and σ via PyTorchKMeans.
+        Force an update on first call or when any center is None; no gradient tracking.
         """
         self.step += 1
         need_init = any(c is None for c in self.centers)
@@ -175,7 +175,7 @@ class Network(nn.Module):
             return
 
         features = zs_list + [common_z]
-        # 禁用梯度
+        # disable gradients
         with torch.no_grad():
             for v, z in enumerate(features):
                 km = torch_clustering.PyTorchKMeans(
@@ -187,15 +187,15 @@ class Network(nn.Module):
                     random_state=0,
                     verbose=False
                 )
-                # fit_predict 不会记录计算图
+                # fit_predict is outside autograd graph
                 labels = km.fit_predict(z.to(dtype=torch.float64)).to(self.device).long()
                 centers = km.cluster_centers_.to(dtype=z.dtype).to(self.device)  # (L, d)
 
-                # 计算每个样本到其簇中心的距离
+                # compute distance from each sample to its assigned center
                 assigned = centers[labels]  # (N, d)
                 dists = torch.norm(z - assigned, dim=1)  # (N,)
 
-                # 每簇 σ_k = max(median(cluster_dists), eps)
+                # per-cluster σ_k = max(median(cluster_dists), eps)
                 sigmas_v = []
                 for k in range(self.num_clusters):
                     d_k = dists[labels == k]
@@ -211,9 +211,9 @@ class Network(nn.Module):
 
     def compute_membership(self, z, v_index):
         """
-        计算视图 v 或共识空间的隶属度 (N×L)。
-        - legacy: Gaussian-kernel membership（原始 Eq.(6)-(7) 风格）
-        - softmax_distance: softmax(-d/T_m)（改进版，降低 \sigma 估计噪声敏感性）
+        Compute memberships (N×L) for view v or consensus space.
+        - legacy: Gaussian-kernel membership (original Eq.6-7 style)
+        - softmax_distance: softmax(-d/T_m), less sensitive to noisy σ estimates
         """
         centers = self.centers[v_index]  # (L, d)
 
@@ -233,9 +233,9 @@ class Network(nn.Module):
 
     def estimate_uncertainty(self, memberships, common_z):
         """
-        SCE 不确定度：
-        - legacy: 熵 + Top-2 gap + max-view 融合（原路径）
-        - log_odds: 方案A，基于 log-odds margin + 可靠性加权跨视图融合（推荐）
+        SCE uncertainty estimation:
+        - legacy: entropy + top-2 gap + max-view fusion (original path)
+        - log_odds: option A using log-odds margin and reliability-weighted view fusion (recommended)
         """
         V = self.num_views
 
@@ -256,7 +256,7 @@ class Network(nn.Module):
             u_hat = self.mlp_uncert(common_z).squeeze(1)
             return u, u_hat
 
-        # 方案A：log-odds margin -> sigmoid，跨视图用可靠性 softmax 融合
+        # Option A: log-odds margin -> sigmoid, then reliability-softmax fusion across views.
         u_vs = []
         gamma_vs = []
         for v in range(V):
@@ -280,12 +280,12 @@ class Network(nn.Module):
                        batch_psedo_label, certain_mask, uncertain_mask,
                        epoch=100, fn_hn_warmup=10):
 
-        # 1) 如果还没到 warm-up，直接跳过
+        # 1) Skip early epochs before warm-up threshold.
         if epoch < fn_hn_warmup or not uncertain_mask.any():
             return None, None, None
         device = self.device
 
-        # 0) 统一到同一个 device
+        # 0) Move tensors onto the same device.
         batch_psedo_label = batch_psedo_label.to(device)
         certain_mask = certain_mask.to(device)
         uncertain_mask = uncertain_mask.to(device)
@@ -295,20 +295,20 @@ class Network(nn.Module):
         k = self.fn_hn_k
         eps = 1e-12
 
-        # 1) 预计算 kNN distances & indices → dists: (V, N, N)
+        # 1) Precompute kNN distances & indices; dists shape is (V, N, N).
         dists = torch.stack([
             torch.cdist(z.to(device), z.to(device), p=2)
             for z in zs_list
         ], dim=0)
 
-        # 2) top-(k+1) 排除自身后取前 k，knn_idx: (V, N, k)
+        # 2) Take top-(k+1), remove self index, keep top-k: knn_idx (V, N, k).
         knn_idx = torch.topk(-dists, k + 1, dim=2).indices[:, :, 1:]
 
-        # 3) 取出对应的标签 & certain mask，全部在 GPU 上
+        # 3) Gather neighbor labels and certain-mask values on GPU.
         knn_labels = batch_psedo_label[knn_idx]  # (V, N, k)
         certain_mask_knn = certain_mask.unsqueeze(0).unsqueeze(2).expand(V, N, k)  # (V, N, k)
 
-        # 4) 计算 Δd_i 的向量化版
+        # 4) Vectorized computation of Δd_i.
         same = (knn_labels == batch_psedo_label.view(1, N, 1)) & certain_mask_knn
         diff = (~same) & certain_mask_knn
         pos_cnt = same.sum(dim=2).float()  # (V, N)
@@ -316,11 +316,11 @@ class Network(nn.Module):
         delta = (pos_cnt - neg_cnt) / (pos_cnt + neg_cnt + eps)  # (V, N)
         delta_d = delta.mean(dim=0)  # (N,)
 
-        # 5) 计算 s_i：共识中心相似度
+        # 5) Compute s_i: consensus-center similarity.
         mu_c = self.centers[V][batch_psedo_label]  # (N, d)
         s = F.cosine_similarity(common_z, mu_c, dim=1)  # (N,)
 
-        # 6) 计算 a_i：跨视图距离均值差
+        # 6) Compute a_i: mean distance discrepancy across views.
         v_idx = torch.arange(V, device=device)[:, None, None]
         n_idx = torch.arange(N, device=device)[None, :, None]
         neigh_d = dists[v_idx, n_idx, knn_idx]  # (V, N, k)
@@ -330,44 +330,44 @@ class Network(nn.Module):
         d_neg = torch.nan_to_num(d_neg, nan=0.0)
         a = ((d_neg - d_pos) / (d_neg + d_pos + eps)).mean(dim=0)  # (N,)
 
-        # 7) 筛出不确定样本，拼接特征，走 MLP
+        # 7) Select uncertain samples, concatenate features, and infer with MLP.
         idx_uncertain = uncertain_mask.nonzero(as_tuple=True)[0]  # (M,)
         feats_all = torch.stack([delta_d, s, a], dim=1)  # (N,3)
         feats = feats_all[idx_uncertain]  # (M,3)
         logits_raw = self.mlp_fn_hn(feats)  # (M,2)
 
-        # —— 改动开始：按置信度分位数丢弃最低 10% —— #
+        # -- Change start: drop bottom 10% by confidence quantile -- #
         probs = F.softmax(logits_raw, dim=1)  # (M,2)
         conf, preds = probs.max(dim=1)  # (M,)
 
-        # 丢弃最低 10% 的 conf
+        # drop bottom 10% confidence samples
         thresh = torch.quantile(conf, 0.1)
         keep = conf > thresh
 
         if keep.sum() == 0:
             return None, None, None
 
-        idx_kept = idx_uncertain[keep]  # 选出剩余的 90%
+        idx_kept = idx_uncertain[keep]  # keep the remaining 90%
         logits = logits_raw[keep]
         feats = feats[keep]
-        # —— 改动结束 —— #
+        # -- Change end -- #
 
         return logits, idx_kept, feats
 
     def compute_consistency_scores(self, memberships, batch_psedo_label):
         """
-        计算跨视图一致性分数 S_ij ∈ [0,1]，形状 (N, N)。
+        Compute cross-view consistency S_ij in [0,1], shape (N, N).
         Args:
-            memberships (list[Tensor[N×L]]): 包含 V 个视图和 1 个共识空间
-            batch_psedo_label (Tensor[N]): 每个样本在共识空间的伪标签
+            English documentation details.
+            English documentation details.
         Returns:
-            S (Tensor[N×N]): 对称矩阵，S[i,j] 表示对 (i,j) 的一致性分数
+            English documentation details.
         """
         N = batch_psedo_label.size(0)
         V = self.num_views
         device = self.device
 
-        # 1) 提取各视图和共识的 “conf” 向量
+        # 1) Extract confidence vectors from each view and consensus.
         conf_v = torch.stack([
             memberships[v][torch.arange(N, device=device), batch_psedo_label]
             for v in range(V)
@@ -375,35 +375,35 @@ class Network(nn.Module):
 
         conf_c = memberships[V][torch.arange(N, device=device), batch_psedo_label].to(device)  # (N,)
 
-        # 2) 计算每个视图的不确定度
+        # 2) Compute uncertainty for each view.
         u_vs = []
         for v in range(V):
             m = memberships[v]  # (N, L)
-            # Top-2 差异计算
+            # top-2 difference computation
             top2 = torch.topk(m, 2, dim=1).values  # (N, 2)
             delta = top2[:, 0] - top2[:, 1]  # (N,)
             delta_norm = (delta - delta.min()) / (delta.max() - delta.min() + 1e-12)
             u_vs.append(delta_norm)
 
         u_i = torch.stack(u_vs, dim=1)  # (N, V)
-        u_weights = 1.0 - u_i  # 不确定度越小，权重越大
+        u_weights = 1.0 - u_i  # lower uncertainty gives larger weight
 
-        # 3) 计算视图一致性分数矩阵 p_v (V, N, N)
+        # 3) Compute per-view consistency matrix p_v (V, N, N).
         p_v = conf_v.unsqueeze(2) * (batch_psedo_label.view(-1, 1) == batch_psedo_label.view(1, -1)).to(
             device)  # (V, N, N)
         p_view_max = p_v.max(dim=0).values  # (N, N)
 
-        # 4) 计算共识空间的一致性分数
+        # 4) Compute consensus-space consistency score.
         p_c = conf_c.view(-1, 1) * (batch_psedo_label.view(-1, 1) == batch_psedo_label.view(1, -1)).to(device)  # (N, N)
 
-        # 5) 基于不确定度的权重加权视图一致性
-        # 扩展 u_weights 为 (N, N) 使其与 p_view_max 兼容
-        u_weights_expanded = u_weights.mean(dim=1)  # (N, V) -> (N,) 通过对视图维度求平均
+        # 5) Weight view consistency by uncertainty-based reliability.
+        # expand u_weights to match p_view_max dimensions
+        u_weights_expanded = u_weights.mean(dim=1)  # (N, V) -> (N,) average over the view dimension
 
-        # 加权后的视图一致性分数
+        # weighted view consistency score
         weighted_p_view_max = p_view_max * u_weights_expanded  # (N, N)
 
-        # 6) 计算最终一致性分数 S_ij
+        # 6) Compute final consistency score S_ij
         S = torch.min(weighted_p_view_max, p_c)  # (N, N)
         return S
 

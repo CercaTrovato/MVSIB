@@ -27,7 +27,7 @@ parser.add_argument("--feature_dim", default =256, type=int)
 parser.add_argument("--large_datasets", default=False, type=lambda x: x.lower()=='true')
 parser.add_argument("--k", default=5, type=int)
 parser.add_argument('--gpu', default='0', type=str, help='GPU device idx.')
-# 以下是我们新增的动态策略超参
+# Additional hyper-parameters for dynamic strategies.
 parser.add_argument('--warmup_epochs', default=20, type=int)
 parser.add_argument('--lambda_u', default=0.1, type=float)
 parser.add_argument('--lambda_hn_penalty',type=float,default=0.1)
@@ -117,7 +117,7 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 if __name__ == "__main__":
-    # — 数据集特定超参 —
+    # - Dataset-specific hyper-parameters -
     if args.dataset == "CCV":
         args.seed, args.k, alpha, beta = 10, 10, 0.0001, 0.001
         args.seed, args.k, alpha, beta = 10, 4, 0.01, 0.1
@@ -134,7 +134,7 @@ if __name__ == "__main__":
 
     print("==================================\nArgs:{}\n==================================".format(args))
     set_seed(args.seed)
-    # — 准备数据和模型 —
+    # - Prepare data and model -
     mv_data = MultiviewData(args.dataset, device)
     num_views = len(mv_data.data_views)
     num_samples = mv_data.labels.size
@@ -165,7 +165,7 @@ if __name__ == "__main__":
     logger = Logger(f"{args.dataset}=={nowtime}")
     logger.info("Args: " + str(args))
 
-    # — Warm-up 预训练 —
+    # - Warm-up pretraining -
     epoch_list = []
     totalloss_list = []
     pre_train(network, mv_data, args.batch_size,
@@ -206,7 +206,7 @@ if __name__ == "__main__":
             epoch_list.append(epoch)
             totalloss_list.append(train_out['loss']['L_total'])
 
-            # 每轮评估
+            # Evaluate every epoch
             acc, nmi, pur, ari, f_score = valid(network, mv_data, num_samples, num_clusters)
             logger.info(f"ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f}")
             print(f"[Epoch {epoch}] ACC={acc:.4f} NMI={nmi:.4f} PUR={pur:.4f} ARI={ari:.4f} F1={f_score:.4f}")
@@ -294,7 +294,7 @@ if __name__ == "__main__":
         print(f"AVG ACC = {avg_acc:.4f}  AVG NMI = {avg_nmi:.4f}  AVG PUR = {avg_pur:.4f}  "
               f"AVG ARI = {avg_ari:.4f}  AVG F1 = {avg_f1:.4f}")
 
-        # 最后一轮评估
+        # Final-epoch evaluation
         print("\n Final Evaluation (Last Epoch):")
         acc, nmi, pur, ari, f_score = valid(network, mv_data, num_samples, num_clusters)
         logger.info("Final Evaluation (Last Epoch):")
@@ -302,7 +302,7 @@ if __name__ == "__main__":
         print('ACC = {:.4f} NMI = {:.4f} PUR = {:.4f} ARI = {:.4f} F1 = {:.4f}'.format(
             acc, nmi, pur, ari, f_score))
 
-        # 最优一轮
+        # Best-epoch summary
         if best_metrics:
             acc, nmi, pur, ari, f_score = best_metrics
             logger.info(f"Best Evaluation (Epoch {best_epoch}):")
@@ -312,7 +312,7 @@ if __name__ == "__main__":
                 acc, nmi, pur, ari, f_score))
 
 
-        # — 保存模型 —
+        # - Save model -
         if args.save_model:
             torch.save({
                 'network_state_dict': network.state_dict(),
